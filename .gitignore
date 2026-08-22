@@ -1,0 +1,8 @@
+.DS_Store
+node_modules/
+.idea/
+.vscode/
+
+# Local-only agent guides, deliberately untracked
+CLAUDE.md
+AGENTS.md

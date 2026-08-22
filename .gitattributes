@@ -1,0 +1,7 @@
+# Fixtures are byte-exact captures of what a server actually sent, CRLF and all. Git must not
+# normalise them: a parser tested against rewritten bytes is not tested against the real thing.
+indexers/*/fixtures/** -text
+
+# Everything else is ordinary source.
+*.mjs text eol=lf
+*.md  text eol=lf
