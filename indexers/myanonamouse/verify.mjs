@@ -141,6 +141,94 @@ console.log('search requests');
   ok('refuses to search with no session configured', err.code === 'unauthorized', err.message);
 }
 
+console.log('server-side filters');
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host);
+  const body = JSON.parse(host.reqs[0].init.body);
+  // The tracker's own version of the zero-seeder hard filter, so a dead torrent never spends one
+  // of the fifty result slots.
+  ok('asks only for torrents with a seeder', body.tor.searchType === 'active');
+  // With text present this is the tracker's relevance weight; seeder order only decides which
+  // fifty rows arrive, and on a prolific author it fills them with well-seeded wrong books.
+  ok('sorts by relevance rather than by seeders', body.tor.sortType === 'default');
+  ok('asks for the isbn field, which is absent without the flag', body.isbn === true);
+}
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host, { language: 'en' });
+  const langs = JSON.parse(host.reqs[0].init.body).tor.browse_lang;
+  ok('filters to the requested language at the tracker', langs.includes(1));
+  // An untagged release is still the right book, so it must not be excluded by the very filter
+  // meant to save result slots.
+  ok('and lets untagged releases through with it', langs.includes(47));
+}
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host, { language: 'spa' });
+  // Spanish is two ids on this tracker; sending one silently halves the results.
+  const langs = JSON.parse(host.reqs[0].init.body).tor.browse_lang;
+  ok('sends every id a language maps to', langs.includes(4) && langs.includes(55));
+}
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host, { language: 'kli' });
+  ok('leaves the language filter off for one it cannot map', JSON.parse(host.reqs[0].init.body).tor.browse_lang === undefined);
+}
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host);
+  ok('leaves the language filter off when none was asked for', JSON.parse(host.reqs[0].init.body).tor.browse_lang === undefined);
+}
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host, { mediaKind: 'comic' });
+  const body = JSON.parse(host.reqs[0].init.body);
+  // Comics live inside E-Books rather than in a main category of their own.
+  ok('narrows a comic search to the comics subcategory', JSON.stringify(body.tor.cat) === '[61]');
+  ok('and still sends the configured main category with it', JSON.stringify(body.tor.main_cat) === '[14]');
+}
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host, { mediaKind: 'ebook' });
+  ok('sends no subcategory for a medium that needs none', JSON.parse(host.reqs[0].init.body).tor.cat === undefined);
+}
+{
+  // The tracker refuses anything outside 5 to 1000, and a request may ask for fewer than five.
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host, { limit: 2 });
+  ok('raises a limit below the tracker floor', JSON.parse(host.reqs[0].init.body).perpage === 5);
+}
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host, { limit: 5000 });
+  ok('lowers a limit above the tracker ceiling', JSON.parse(host.reqs[0].init.body).perpage === 1000);
+}
+
+console.log('broadened retry');
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  await search(host);
+  ok('does not broaden a search that found something', host.reqs.length === 1);
+}
+{
+  // Series packs name the individual book only in the description body, so a title search finds
+  // nothing at all for a book that is definitely on the tracker.
+  const host = makeHost(() => json({ data: [] }));
+  const found = await search(host);
+  ok('retries once when nothing was found', host.reqs.length === 2);
+  const first = JSON.parse(host.reqs[0].init.body).tor.srchIn;
+  const second = JSON.parse(host.reqs[1].init.body).tor.srchIn;
+  ok('and only the retry searches the series and description', first.description === undefined && second.description === 'true' && second.series === 'true');
+  ok('and still comes back empty when the retry finds nothing either', found.length === 0);
+}
+{
+  let call = 0;
+  const host = makeHost(() => json({ data: call++ === 0 ? [] : [ROW] }));
+  const found = await search(host);
+  ok('returns what the broadened retry found', found.length === 1);
+}
+
 console.log('reading a row');
 {
   const host = makeHost(() => json({ data: [{ ...ROW, mediainfo: MEDIAINFO }] }));
@@ -180,6 +268,27 @@ for (const [name, patch] of [
   const host = makeHost(() => json({ data: [{ ...ROW, author_info: '{"1":"A","2":"B","3":"C","4":"D"}' }] }));
   const [r] = await search(host);
   ok('names at most three authors', r.author === 'A, B, C');
+}
+
+console.log('isbn and snatched state');
+{
+  const host = makeHost(() => json({ data: [{ ...ROW, isbn: '9789401617598', my_snatched: 1 }] }));
+  const [release] = await search(host);
+  ok('carries the stated isbn', release.isbn === '9789401617598');
+  ok('marks a release the account already snatched', release.alreadyGrabbed === true);
+}
+{
+  // The same field carries `ASIN:B08G9PRS1K` on some rows. The plugin passes it through and
+  // BookOrbit's ISBN normalisation is what refuses it, so nothing here has to know the difference.
+  const host = makeHost(() => json({ data: [{ ...ROW, isbn: 'ASIN:B08G9PRS1K' }] }));
+  const [release] = await search(host);
+  ok('passes a non-ISBN identifier through untouched', release.isbn === 'ASIN:B08G9PRS1K');
+}
+{
+  const host = makeHost(() => json({ data: [ROW] }));
+  const [release] = await search(host);
+  ok('states no isbn where the row carries none', release.isbn === undefined);
+  ok('and reads an absent snatched flag as not snatched', release.alreadyGrabbed === false);
 }
 
 console.log('sizes');

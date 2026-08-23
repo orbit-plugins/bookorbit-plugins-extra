@@ -97,9 +97,13 @@ const MD5_IN_HREF = /(?:ads|get)\.php\?md5=([a-f0-9]{32})/i;
 
 /**
  * The ISBNs the catalogue holds against a row, written into the only green font on the page and
- * beside the edition link rather than in a column of their own. Two thirds of rows carry them,
- * and an ISBN a request also states is worth more than every other signal put together, so this
- * is the one field here that changes which release wins rather than only how it reads.
+ * beside the edition link rather than in a column of their own. An ISBN a request also states is
+ * worth more than every other signal put together, so this is the one field here that changes
+ * which release wins rather than only how it reads.
+ *
+ * Stated on a minority of rows: 19 of 50 for "Dune Frank Herbert" and none of the 8 for "Dead of
+ * Winter Darcy Coates", measured 2026-08-23. That coverage is why `search` cannot stop at the
+ * exact pass.
  */
 const ROW_ISBNS = /<font[^>]*color=["']green["'][^>]*>([^<]*)<\/font>/i;
 
@@ -204,6 +208,7 @@ export default {
    * available anywhere".
    */
   mediaKinds: ['ebook', 'comic'],
+  supportsIsbnSearch: true,
   usesCategories: false,
   /** Nothing is seeded back, so a seed goal here would be a number that means nothing. */
   seedsBack: false,
@@ -233,20 +238,16 @@ export default {
   ],
 
   /**
-   * Two passes over the catalogue, both bounded by one budget.
+   * The active ISBN first when the request states one, then title and author.
    *
-   * The first runs only where the request states an ISBN and matches the ISBN column alone. It is
-   * the most accurate query this site accepts - measured against libgen.li it answered 51 rows for
-   * Dune and every one of them was the right edition - but it cannot be the only one: the ISBN on
-   * a request comes from a metadata provider and often names a foreign edition the catalogue has
-   * never held, which answers with nothing at all for a book the site holds fifty copies of.
+   * Both, because this catalogue's ISBN coverage is partial and its gaps are not the obscure
+   * books. Measured 2026-08-23: "Dune Frank Herbert" states an ISBN on 19 of 50 file rows, and
+   * "Dead of Winter Darcy Coates" on none of its 8, so searching that book's ISBN answers with
+   * nothing while its title answers with four EPUBs. An exact pass on its own would report a book
+   * the site plainly holds as unavailable.
    *
-   * So it is additive. Whatever it finds goes in first, and the ordinary text search fills the
-   * rest, which is what keeps a wrong-edition ISBN costing one request rather than the search.
-   *
-   * Every page costs a round trip, so this stops at the first opportunity it gets: the moment the
-   * limit is filled, the moment a short page says there is nothing more, and before starting a page
-   * that the measured cost of the last one says will not finish in time.
+   * The exact pass still goes first and its rows still lead, so an ISBN that does hit decides the
+   * edition. The text pass only fills whatever is left of the limit.
    */
   async search(query, config, host, signal) {
     const formats = configuredFormats(config, query.mediaKind);
@@ -256,15 +257,27 @@ export default {
 
     const found = { releases: [], seen: new Set(), started: Date.now(), slowestPageMs: 0, pages: 0 };
     const passes = [];
-    // One page only. Every row it can return is the same edition, so a second page of them would
-    // spend a round trip on rows the first page already made the case for.
-    if (query.isbn13) passes.push({ req: query.isbn13, columns: ISBN_COLUMNS, maxPages: 1, required: false });
-    passes.push({ req: host.buildSearchText(query), columns: TEXT_COLUMNS[query.mediaKind] ?? [], maxPages: MAX_PAGES, required: true });
+    // One page is enough for an ISBN because every row is the same edition.
+    if (/^\d{13}$/.test(query.isbn13 ?? '')) passes.push({ req: query.isbn13, columns: ISBN_COLUMNS, maxPages: 1 });
+    // Text searches retain bounded paging so language and format filtering can look past a full
+    // unsuitable first page.
+    passes.push({ req: host.buildSearchText(query), columns: TEXT_COLUMNS[query.mediaKind] ?? [], maxPages: MAX_PAGES });
 
+    let failure = null;
     for (const pass of passes) {
-      if (found.releases.length >= query.limit) break;
-      await readPass(pass, query, config, formats, host, signal, found);
+      if (found.releases.length >= query.limit || signal?.aborted) break;
+      // One budget across both, so a slow exact pass spends the room the recovery would have used.
+      if (Date.now() - found.started + found.slowestPageMs > SEARCH_BUDGET_MS) break;
+      try {
+        await readPass(pass, query, config, formats, host, signal, found);
+      } catch (error) {
+        // Held rather than thrown. Neither pass is the search on its own: an exact query that
+        // errors is recoverable by the text one, and rows already in hand outlive a text query
+        // that errors after them. A failure only failed the search if nothing else answered.
+        failure ??= error;
+      }
     }
+    if (failure && found.releases.length === 0) throw failure;
 
     logSearch(host, config, query, found.releases.length, found.pages, found.started);
     return found.releases;
@@ -465,9 +478,8 @@ function normalizeLanguage(value) {
  * dedupe set and one time budget, and a pass that ignored what the last one spent could not stop
  * in time.
  *
- * A pass that is not `required` never fails the search. It is a bonus query whose whole value is
- * that it sometimes answers; when it does not, the pass that follows is the one that has to
- * explain itself.
+ * Throws where the pass itself could not be read. Whether that is worth failing the whole search
+ * over is not knowable here, and is decided by `search` once every pass has had its turn.
  */
 async function readPass(pass, query, config, formats, host, signal, found) {
   for (let page = 1; page <= pass.maxPages; page += 1) {
@@ -477,17 +489,21 @@ async function readPass(pass, query, config, formats, host, signal, found) {
     try {
       html = await readPage(host, searchUrl(config, pass.req, query.mediaKind, page, pass.columns).href, MAX_SEARCH_BYTES, config);
     } catch (error) {
-      // The first page of the required pass failing is the search failing, and the operator needs
-      // to hear why. A later one is a page we were only hoping for: this site answers the same
+      // A first page failing is this pass failing, which `search` weighs against what the other
+      // pass found. A later one is a page we were only hoping for: this site answers the same
       // query in 1.3s and in 25s, and throwing away the rows already in hand over the slow one
       // would turn a good search into no search at all.
-      if (page === 1 && pass.required) throw error;
+      if (page === 1) throw error;
       host.logger.warn(
         `[libgen.search] [fail] indexerId=${config.id} page=${page} found=${found.releases.length} ` +
           `error="${error instanceof Error ? error.message : String(error)}" - keeping what earlier pages found`,
       );
       return;
     }
+
+    // Recorded before any early return below: a pass that stops here still spent this page, and
+    // the pass after it draws on the same budget.
+    found.slowestPageMs = Math.max(found.slowestPageMs, Date.now() - pageStarted);
 
     const table = findTable(html, RESULTS_TABLE_ID);
 
@@ -496,7 +512,7 @@ async function readPass(pass, query, config, formats, host, signal, found) {
       // what decides: still there and this is the site answering with nothing, gone as well and
       // it is not this site. On a later page it is simply the end of the results, and everything
       // already collected still stands.
-      if (page === 1 && pass.required && !FILES_TAB.test(html)) {
+      if (page === 1 && !FILES_TAB.test(html)) {
         throw host.fail('unreachable', 'the mirror answered without a results table or a tab bar, so it is either not this site or its markup has changed');
       }
       return;
@@ -520,8 +536,6 @@ async function readPass(pass, query, config, formats, host, signal, found) {
     // page can be full and still yield nothing usable, and that is a reason to keep going.
     if (rows.filter((row) => MD5_IN_HREF.test(row)).length < PAGE_SIZE) return;
     if (signal?.aborted) return;
-
-    found.slowestPageMs = Math.max(found.slowestPageMs, Date.now() - pageStarted);
     if (Date.now() - found.started + found.slowestPageMs > SEARCH_BUDGET_MS) return;
   }
 }

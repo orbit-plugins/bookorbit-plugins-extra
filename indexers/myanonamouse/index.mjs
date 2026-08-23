@@ -33,6 +33,84 @@ const MAX_REFUSAL_CHARS = 200;
 /** Anything shorter described one file of a multi-file set, not the release. */
 const MIN_PLAUSIBLE_DURATION_SECONDS = 10 * 60;
 
+/** The tracker refuses anything outside this, and a request may ask for fewer than five. */
+const MIN_PER_PAGE = 5;
+const MAX_PER_PAGE = 1000;
+
+/**
+ * The E-Books subcategory that actually holds comics, confirmed against the live category list on
+ * 2026-08-20. Sent alongside `main_cat` rather than instead of it: whether `tor.cat` narrows a
+ * search was never confirmed, and if the tracker ignores it the search is simply the whole E-Books
+ * category it already was.
+ */
+const COMIC_CATEGORIES = [61];
+
+/**
+ * The tracker's own language numbers, harvested on 2026-08-20 by sampling `language`/`lang_code`
+ * pairs; they are not in its API reference. Keyed by both the two- and three-letter codes a request
+ * might carry, since BookOrbit normalises neither.
+ *
+ * The map is many-to-one on purpose: Spanish is 4 and 55, Portuguese is 34 and 52, and sending only
+ * one of each pair silently halves the results for those languages.
+ */
+const LANGUAGE_IDS = {
+  en: [1], eng: [1],
+  zh: [2, 44], chi: [2], yue: [44],
+  es: [4, 55], spa: [4, 55],
+  th: [7], tha: [7],
+  hi: [8], hin: [8],
+  mr: [9], mar: [9],
+  te: [10], tel: [10],
+  ta: [11], tam: [11],
+  vi: [13], vie: [13],
+  ur: [15], urd: [15],
+  ru: [16], rus: [16],
+  af: [17], afr: [17],
+  bg: [18], bul: [18],
+  ca: [19], cat: [19],
+  cs: [20], cze: [20], ces: [20],
+  da: [21], dan: [21],
+  nl: [22], dut: [22], nld: [22],
+  fi: [23], fin: [23],
+  uk: [25], ukr: [25],
+  el: [26], gre: [26], ell: [26],
+  he: [27], heb: [27],
+  hu: [28], hun: [28],
+  tl: [29], tgl: [29],
+  ro: [30], rom: [30], ron: [30],
+  sr: [31], srp: [31],
+  ar: [32], ara: [32],
+  pt: [34, 52], por: [34, 52],
+  bn: [35], ben: [35],
+  fr: [36], fre: [36], fra: [36],
+  de: [37], ger: [37], deu: [37],
+  ja: [38], jpn: [38],
+  fa: [39], fas: [39], per: [39],
+  sv: [40], swe: [40],
+  ko: [41], kor: [41],
+  tr: [42], tur: [42],
+  it: [43], ita: [43],
+  pl: [45], pol: [45],
+  la: [46], lat: [46],
+  no: [48], nor: [48],
+  hr: [49], hrv: [49],
+  lt: [50], lit: [50],
+  bs: [51], bos: [51],
+  id: [53], ind: [53],
+  sl: [54], slv: [54],
+  ga: [56], gle: [56],
+  ml: [58], mal: [58],
+  grc: [59],
+  sa: [60], san: [60],
+};
+
+/**
+ * What the tracker files a release under when nobody said. Sent alongside whatever language was
+ * asked for, so an untagged copy of the right book is not excluded by the very filter meant to
+ * save result slots.
+ */
+const UNKNOWN_LANGUAGE_ID = 47;
+
 /** The live session per indexer, which the tracker rotates out from under the stored one. */
 const sessions = new Map();
 /** When the seedbox registration was last attempted per indexer, to respect the hourly limit. */
@@ -50,7 +128,8 @@ export default {
   seedsBack: true,
   defaultBaseUrl: 'https://www.myanonamouse.net',
   baseUrlHint: "The tracker's own address, normally https://www.myanonamouse.net",
-  // Its own main category numbers. It has no comic category, so comics fall back to the ebook one.
+  // Its own main category numbers. Comics live inside E-Books rather than in a main category of
+  // their own, so the medium keeps 14 here and the search narrows it with `cat` (COMIC_CATEGORIES).
   defaultCategories: { ebook: [14], audiobook: [13], comic: [14] },
   settingsFields: [
     {
@@ -63,32 +142,16 @@ export default {
   ],
 
   async search(query, config, host) {
-    const body = {
-      tor: {
-        text: host.buildSearchText(query),
-        srchIn: { title: 'true', author: 'true' },
-        searchType: 'all',
-        searchIn: 'torrents',
-        main_cat: config.categories[query.mediaKind],
-        sortType: 'seedersDesc',
-        startNumber: 0,
-      },
-      perpage: query.limit,
-    };
+    const found = await runSearch(query, config, host, false);
+    if (found.length > 0) return found;
 
-    // The host applies its own deadline to every call, so `signal` is not forwarded.
-    const response = await call(config, host, SEARCH_PATH, {
-      method: 'POST',
-      body: JSON.stringify(body),
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-    const payload = await readJson(config, host, response);
-    // "Nothing returned" is how the tracker says zero results; it is not a failure.
-    if (payload.error && /nothing returned/i.test(payload.error)) return [];
-    if (payload.error) throw host.fail('error', payload.error);
-
-    return (payload.data ?? []).map((row) => toRelease(row, config)).filter(Boolean);
+    /**
+     * The tracker is full of series packs whose torrent name is the series and whose individual
+     * books are named only in the description body, so a title search finds nothing at all for a
+     * book that is definitely there. Broadening costs a second request, and only on a miss, which
+     * is exactly when it is worth spending: a successful search is never diluted by it.
+     */
+    return runSearch(query, config, host, true);
   },
 
   async test(config, host) {
@@ -141,6 +204,65 @@ export default {
     await authorizeSeedbox(config, host);
   },
 };
+
+async function runSearch(query, config, host, broaden) {
+  // The host applies its own deadline to every call, so `signal` is not forwarded.
+  const response = await call(config, host, SEARCH_PATH, {
+    method: 'POST',
+    body: JSON.stringify(searchBody(query, config, host, broaden)),
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  const payload = await readJson(config, host, response);
+  // "Nothing returned" is how the tracker says zero results; it is not a failure.
+  if (payload.error && /nothing returned/i.test(payload.error)) return [];
+  if (payload.error) throw host.fail('error', payload.error);
+
+  return (payload.data ?? []).map((row) => toRelease(row, config)).filter(Boolean);
+}
+
+function searchBody(query, config, host, broaden) {
+  const body = {
+    tor: {
+      text: host.buildSearchText(query),
+      srchIn: broaden ? { title: 'true', author: 'true', series: 'true', description: 'true' } : { title: 'true', author: 'true' },
+      /**
+       * The tracker's own version of the zero-seeder hard filter BookOrbit applies afterwards.
+       * Pushing it here stops a dead torrent from spending one of the result slots. `searchType`
+       * takes exactly one value, so this and freeleech-only cannot both be on; freeleech stays a
+       * scoring bonus and a picker facet instead.
+       */
+      searchType: 'active',
+      searchIn: 'torrents',
+      main_cat: config.categories[query.mediaKind],
+      /**
+       * With text present this is the tracker's own relevance weight. Sorting by seeders instead
+       * only decides which fifty rows arrive, and on a prolific author it fills them with the
+       * best-seeded wrong books; BookOrbit re-ranks whatever comes back regardless.
+       */
+      sortType: 'default',
+      startNumber: 0,
+    },
+    // Absent without this. Coverage measured at four rows in six on 2026-08-20, and the field is
+    // not always an ISBN - `ASIN:B08G9PRS1K` appears in it - which BookOrbit's normalisation drops.
+    isbn: true,
+    perpage: Math.min(MAX_PER_PAGE, Math.max(MIN_PER_PAGE, query.limit)),
+  };
+
+  if (query.mediaKind === 'comic') body.tor.cat = COMIC_CATEGORIES;
+
+  const languages = browseLanguages(query.language);
+  if (languages) body.tor.browse_lang = languages;
+
+  return body;
+}
+
+/** Null where the language is unmapped, which leaves the filter off rather than guessing an id. */
+function browseLanguages(language) {
+  if (!language) return null;
+  const ids = LANGUAGE_IDS[language.trim().toLowerCase()];
+  return ids ? [...ids, UNKNOWN_LANGUAGE_ID] : null;
+}
 
 function call(config, host, path, init) {
   if (!config.credential) throw host.fail('unauthorized', 'no session id is configured');
@@ -306,6 +428,10 @@ function toRelease(row, config) {
     ...(format ? { format } : {}),
     ...(row.lang_code ? { language: row.lang_code } : {}),
     ...(author ? { author } : {}),
+    ...(typeof row.isbn === 'string' && row.isbn.trim() ? { isbn: row.isbn.trim() } : {}),
+    // The tracker states a delay of five to twenty minutes on this, so it marks a row in the
+    // picker and is never filtered on.
+    alreadyGrabbed: isTruthyFlag(row.my_snatched),
     // `fl_vip` is deliberately not consulted here: the tracker defines it as freeleech *or* VIP, so
     // a VIP-only torrent sets it while still costing download for anyone who is not a VIP member.
     freeleech: isTruthyFlag(row.free) || isTruthyFlag(row.personal_freeleech),

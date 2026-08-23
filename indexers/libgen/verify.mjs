@@ -23,6 +23,12 @@ const CROWDED_2 = fixture('crowded-page2.html');
 // "The Spider Silk Scarf Ana Reyes", which the catalogue does not hold. A zero-hit search drops
 // the results table entirely and keeps only the tab bar, so this is what finding nothing looks like.
 const NO_HITS = fixture('no-hits.html');
+// Both passes for "Dead of Winter" by Darcy Coates, ISBN 9781728270258, captured 2026-08-23. The
+// catalogue holds 8 files for this book and states an ISBN on none of them, so the exact pass
+// comes back with nothing while the title answers with all 8. This is the case an exact-only
+// search reported as unavailable for a book sitting right there.
+const ISBN_MISS = fixture('isbn-miss.html'); // res=50, columns=i, req=9781728270258
+const ISBN_MISS_TEXT = fixture('isbn-miss-text.html'); // res=50, columns=t,a, req=Dead of Winter Darcy Coates
 const EMPTY_TABLE = '<html><table id="tablelibgen"><tbody></tbody></table></html>';
 
 /** Serves a page per `page` parameter, and an empty table past the end. */
@@ -93,6 +99,7 @@ ok('plugin version', plugin.version === '1.0.0');
 ok('no credential of any kind', plugin.requiresCredential === false && plugin.credentialKind === null);
 ok('resolveFile only', typeof plugin.resolveFile === 'function' && plugin.fetchTorrentFile === undefined);
 ok('no seeding', plugin.seedsBack === false);
+ok('declares exact ISBN search', plugin.supportsIsbnSearch === true);
 ok('media kinds', JSON.stringify(plugin.mediaKinds) === '["ebook","comic"]');
 
 console.log('search against the live ebook page');
@@ -192,18 +199,77 @@ console.log('the isbn pass');
   ok('the isbn pass goes first', first.searchParams.getAll('columns[]').join() === 'i', first.searchParams.getAll('columns[]').join());
   ok('and searches the isbn, not the title', first.searchParams.get('req') === '9780593135211', first.searchParams.get('req'));
   ok('its rows are kept', out.length > 0, out.length);
-  ok('and it still runs the text pass to fill up', host.calls.length > 1, host.calls.length);
+  ok(
+    'and the text pass that follows it searches the title',
+    host.calls.length === 2 && new URL(host.calls[1]).searchParams.getAll('columns[]').join() === 't,a',
+    host.calls.length,
+  );
 }
 {
-  const host = makeHost((url) => res(new URL(url).searchParams.getAll('columns[]').join() === 'i' ? NO_HITS : SEARCH_EBOOK));
-  const out = await plugin.search({ ...query, isbn13: '9781111111111' }, cfg(), host);
-  ok('an isbn the catalogue never held falls through to the text pass', out.length > 0, out.length);
-  ok('and costs exactly one wasted request', host.calls.length === 2, host.calls.length);
+  // Both passes answer, with no row in common. The exact edition is what the request asked for,
+  // so it has to lead whatever the recovery adds behind it.
+  const host = makeHost((url) => res(new URL(url).searchParams.getAll('columns[]').join() === 'i' ? SEARCH_EBOOK : ISBN_MISS_TEXT));
+  const exactOnly = await plugin.search({ ...query, isbn13: '9780593135211' }, cfg(), makeHost(() => res(SEARCH_EBOOK)));
+  const out = await plugin.search({ ...query, isbn13: '9780593135211' }, cfg(), host);
+  const exactGuids = exactOnly.map((r) => r.guid);
+  ok('exact rows come before the recovery rows', out.slice(0, exactGuids.length).every((r, i) => r.guid === exactGuids[i]), out.slice(0, 3).map((r) => r.title));
+  ok('and the recovery is added rather than replacing them', out.length > exactGuids.length, [exactGuids.length, out.length]);
+}
+{
+  const host = makeHost(() => res(NO_HITS));
+  await plugin.search({ ...query, isbn13: '9780593135211', isbn13s: ['9780593135211', '9781111111111'] }, cfg(), host);
+  const isbnCalls = host.calls
+    .map((url) => new URL(url))
+    .filter((url) => url.searchParams.getAll('columns[]').join() === 'i')
+    .map((url) => url.searchParams.get('req'));
+  ok('only the active isbn gets an exact pass', JSON.stringify(isbnCalls) === '["9780593135211"]', isbnCalls);
+}
+{
+  // The bug this pair of fixtures exists for: an ISBN the catalogue does not state against any of
+  // its rows used to end the search, reporting 8 files as no matches.
+  const host = makeHost((url) => res(new URL(url).searchParams.getAll('columns[]').join() === 'i' ? ISBN_MISS : ISBN_MISS_TEXT));
+  const out = await plugin.search({ ...query, title: 'Dead of Winter', author: 'Darcy Coates', isbn13: '9781728270258' }, cfg(), host);
+  const [exact, text] = host.calls.map((url) => new URL(url));
+
+  ok('an isbn stated on no row falls back to title and author', out.length === 8, out.length);
+  ok('the exact pass still went first', exact.searchParams.getAll('columns[]').join() === 'i' && exact.searchParams.get('req') === '9781728270258');
+  ok(
+    'and the recovery searches the title, not the isbn',
+    text?.searchParams.getAll('columns[]').join() === 't,a' && text.searchParams.get('req') === 'Dead of Winter Darcy Coates',
+    text?.searchParams.get('req'),
+  );
+  ok('the rows really are the book', out.every((r) => r.title === 'Dead of Winter'), [...new Set(out.map((r) => r.title))]);
+  ok('including the epubs the exact pass reported as unavailable', out.filter((r) => r.format === 'epub').length === 4, out.map((r) => r.format));
+  ok('recovery costs one extra request, not a page walk', host.calls.length === 2, host.calls.length);
+}
+{
+  // A zero-hit exact pass is not a reachability problem, and the recovery coming back empty too
+  // must not turn into one: the request genuinely has nothing here.
+  const host = makeHost(() => res(ISBN_MISS));
+  const out = await plugin.search({ ...query, isbn13: '9781728270258' }, cfg(), host).catch((e) => e);
+  ok('both passes empty is an empty result, not a failure', Array.isArray(out) && out.length === 0, out.code ?? out);
+}
+{
+  // The recovery is a bonus query. It has already been proved that the mirror answers, so a
+  // mirror that falls over on the second request must not lose the search.
+  const host = makeHost((url) => {
+    if (new URL(url).searchParams.getAll('columns[]').join() === 'i') return res(SEARCH_EBOOK);
+    throw new Error('connection reset');
+  });
+  const out = await plugin.search({ ...query, isbn13: '9780593135211' }, cfg(), host).catch((e) => e);
+  ok('a failed recovery keeps the exact rows', Array.isArray(out) && out.length > 0, out.code ?? out);
 }
 {
   const host = makeHost((url) => (new URL(url).searchParams.getAll('columns[]').join() === 'i' ? res('boom', { status: 500 }) : res(SEARCH_EBOOK)));
-  const out = await plugin.search({ ...query, isbn13: '9780593135211' }, cfg(), host);
-  ok('an isbn pass that fails outright does not fail the search', out.length > 0, out.length);
+  const out = await plugin.search({ ...query, isbn13: '9780593135211' }, cfg(), host).catch((error) => error);
+  ok('an isbn pass that fails outright does not fail the search', Array.isArray(out) && out.length > 0, out.code ?? out);
+  ok('and the text pass still ran', host.calls.length === 2, host.calls.length);
+}
+{
+  const host = makeHost(() => res('boom', { status: 500 }));
+  const err = await plugin.search({ ...query, isbn13: '9780593135211' }, cfg(), host).catch((error) => error);
+  ok('both passes failing does fail the search', err.code === 'error', err.code);
+  ok('and it reports the first failure rather than swallowing it', /500/.test(err.message), err.message);
 }
 {
   const host = makeHost(() => res(SEARCH_EBOOK));
