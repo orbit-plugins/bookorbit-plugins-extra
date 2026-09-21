@@ -113,7 +113,7 @@ ok('needs a session credential', plugin.requiresCredential === true && plugin.cr
 ok('carries all three media', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook","comic"]');
 ok('joins a swarm and uses categories', plugin.seedsBack === true && plugin.usesCategories === true);
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '1.0.1');
+ok('plugin version', plugin.version === '1.0.2');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/myanonamouse.json') && plugin.update.ed25519PublicKey.length === 43);
 ok(
   'signed update manifest',
@@ -516,6 +516,24 @@ console.log('dynamic seedbox');
   const host = makeHost((url) => (url.includes('dynamicSeedbox') ? json({ Success: false, msg: 'No change' }) : bencode()));
   await plugin.fetchTorrentFile({ downloadUrl: 'https://x/1' }, cfg({ settings: { dynamicSeedbox: true } }), host);
   ok('treats "no change" as success', host.logs.some((m) => /seedbox address registered/.test(m)), host.logs);
+}
+{
+  // The site host answers this endpoint with a 302 to the announce host, and the redirect is not
+  // followed with the session attached, so asking the site host registers nothing at all.
+  const host = makeHost((url) => (url.includes('dynamicSeedbox') ? json({ Success: true, msg: 'Completed' }) : bencode()));
+  await plugin.fetchTorrentFile({ downloadUrl: 'https://x/1' }, cfg({ settings: { dynamicSeedbox: true } }), host);
+  const seedbox = host.calls.find((u) => u.includes('dynamicSeedbox'));
+  ok('registers against the announce host, not the site host', seedbox === 'https://t.myanonamouse.net/json/dynamicSeedbox.php', seedbox);
+  ok('and leaves every other call on the configured host', host.calls.filter((u) => !u.includes('dynamicSeedbox')).every((u) => !u.includes('//t.')), host.calls);
+}
+{
+  // A base url without the www label, and one already naming the announce host, reach the same place.
+  for (const baseUrl of ['https://myanonamouse.net', 'https://t.myanonamouse.net', 'https://www.myanonamouse.net/']) {
+    const host = makeHost((url) => (url.includes('dynamicSeedbox') ? json({ Success: true, msg: 'Completed' }) : bencode()));
+    await plugin.fetchTorrentFile({ downloadUrl: 'https://x/1' }, cfg({ baseUrl, settings: { dynamicSeedbox: true } }), host);
+    const seedbox = host.calls.find((u) => u.includes('dynamicSeedbox'));
+    ok(`derives the announce host from ${baseUrl}`, seedbox === 'https://t.myanonamouse.net/json/dynamicSeedbox.php', seedbox);
+  }
 }
 
 console.log('test() and keepalive()');

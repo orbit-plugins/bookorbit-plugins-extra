@@ -18,6 +18,11 @@ const KEEPALIVE_PATH = '/jsonLoad.php';
  * Registers the *calling* IP as the account's seedbox address. Being on the session's ASN gets a
  * search and a .torrent download accepted; it does not get an announce accepted, which the tracker
  * checks against this separate registration and otherwise rejects as "Unrecognized host/PassKey".
+ *
+ * Served from the announce host, not the site host: `www` answers it with a 302 to `t`, and the
+ * host's fetch drops credential headers across an origin change, so the redirect can only ever
+ * arrive unauthenticated. `fetchWithSession` reads any 3xx as a rejected session, which is why
+ * asking `www` reports "the session id was rejected. It is ASN locked" and registers nothing.
  */
 const SEEDBOX_PATH = '/json/dynamicSeedbox.php';
 /** The tracker will not move the registration more than once an hour, so neither do we. */
@@ -118,7 +123,7 @@ const seedboxTouchedAt = new Map();
 
 export default {
   apiVersion: 1,
-  version: '1.0.1',
+  version: '1.0.2',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/myanonamouse.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -268,10 +273,18 @@ function browseLanguages(language) {
   return ids ? [...ids, UNKNOWN_LANGUAGE_ID] : null;
 }
 
-function call(config, host, path, init) {
+function call(config, host, path, init, baseUrl = config.baseUrl) {
   if (!config.credential) throw host.fail('unauthorized', 'no session id is configured');
-  const base = config.baseUrl.replace(/\/+$/, '');
+  const base = baseUrl.replace(/\/+$/, '');
   return fetchWithSession(config, host, `${base}${path}`, init);
+}
+
+/** The configured host with its `www` label swapped for the `t` the announce endpoints live on. */
+function announceBase(config) {
+  const url = new URL(config.baseUrl);
+  const bare = url.hostname.replace(/^www\./i, '');
+  url.hostname = /^t\./i.test(bare) ? bare : `t.${bare}`;
+  return url.origin;
 }
 
 async function fetchWithSession(config, host, url, init) {
@@ -319,7 +332,7 @@ async function authorizeSeedbox(config, host) {
   if (last !== undefined && Date.now() - last < SEEDBOX_MIN_INTERVAL_MS) return;
 
   try {
-    const response = await call(config, host, SEEDBOX_PATH, { method: 'GET' });
+    const response = await call(config, host, SEEDBOX_PATH, { method: 'GET' }, announceBase(config));
     // Stamped on an answer rather than on an attempt: a call that never reached the tracker has
     // not used up the hour, and holding the next grab off for one would be the wrong trade.
     seedboxTouchedAt.set(config.id, Date.now());
