@@ -62,7 +62,7 @@ const FORMAT_CELL = 7;
  * Which of the site's own collections to search per medium. Ebooks span both the non-fiction and
  * fiction collections, because a request does not know which side of that line its book falls on.
  */
-const TOPICS = { ebook: ['l', 'f'], comic: ['c'] };
+const TOPICS = { ebook: ['l', 'f'] };
 
 /**
  * Rows per page. Asked for larger than any request wants because both the format and the language
@@ -109,22 +109,16 @@ const ROW_ISBNS = /<font[^>]*color=["']green["'][^>]*>([^<]*)<\/font>/i;
  * six - title, author, series, year, publisher and ISBN - which is why "Dune Frank Herbert"
  * answers with Dune Saga Collection and Sisterhood of Dune ahead of the novel: they match on a
  * series and a publisher the request never asked about.
- *
- * A comic keeps the series column, because that is where its name lives: the title of a comic row
- * is "#404 1987-feb" and the request states "Batman Year One". Measured against the comics
- * collection the column set changes nothing at all, so this is for the day that stops being true.
  */
-const TEXT_COLUMNS = { ebook: ['t', 'a'], comic: ['t', 'a', 's'] };
+const TEXT_COLUMNS = { ebook: ['t', 'a'] };
 /** The exact-edition pass matches the ISBN column and nothing else. */
 const ISBN_COLUMNS = ['i'];
 
 const DEFAULT_EBOOK_FORMATS = 'epub,mobi,azw,azw3,fb2,djvu';
-const DEFAULT_COMIC_FORMATS = 'cbz,cb7,pdf';
 
 /** Only formats BookOrbit accepts for the medium; anything else would be filtered out later. */
 const ALLOWED_FORMATS = {
   ebook: ['epub', 'mobi', 'azw', 'azw3', 'fb2', 'djvu'],
-  comic: ['cbz', 'cb7', 'pdf'],
 };
 
 /** How the catalogue spells a language against what a request states. */
@@ -193,7 +187,7 @@ const ISO_639_2_TO_1 = {
 
 export default {
   apiVersion: 1,
-  version: '1.1.6',
+  version: '2.0.0',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/libgen.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -203,12 +197,13 @@ export default {
   requiresCredential: false,
   credentialKind: null,
   /**
-   * Text and comics. Both are one file per release, which is what the direct download import path
-   * takes. Audiobooks are left out because the catalogue is a text library: a request for one is
-   * answered with "does not carry audiobooks" rather than with an empty list that reads as "not
-   * available anywhere".
+   * Text only, one file per release, which is what the direct download import path takes.
+   * Audiobooks are left out because the catalogue is a text library: a request for one is answered
+   * with "does not carry audiobooks" rather than with an empty list that reads as "not available
+   * anywhere". Comics are no longer searched: BookOrbit stopped requesting them, and an older server
+   * that still asks is told this source does not carry them.
    */
-  mediaKinds: ['ebook', 'comic'],
+  mediaKinds: ['ebook'],
   supportsIsbnSearch: true,
   usesCategories: false,
   /** Nothing is seeded back, so a seed goal here would be a number that means nothing. */
@@ -224,16 +219,6 @@ export default {
       default: DEFAULT_EBOOK_FORMATS,
       format: 'list',
       options: ALLOWED_FORMATS.ebook,
-      minItems: 1,
-    },
-    {
-      key: 'comicFormats',
-      type: 'string',
-      label: 'Comic formats',
-      hint: 'Results in other formats are dropped because the site has no format filter.',
-      default: DEFAULT_COMIC_FORMATS,
-      format: 'list',
-      options: ALLOWED_FORMATS.comic,
       minItems: 1,
     },
   ],
@@ -359,7 +344,7 @@ function toRelease(row, config, formats) {
 
   return {
     guid: md5,
-    ...readTitle(cells[TITLE_CELL], heading),
+    ...readTitle(heading),
     sizeBytes: parseSize(cellText(cells[SIZE_CELL])),
     // Not zero. Nothing here publishes swarm counts, and a zero would be read as a dead torrent
     // and filtered out.
@@ -375,20 +360,10 @@ function toRelease(row, config, formats) {
 }
 
 /**
- * What to call the release, which the catalogue writes differently for a book and for a comic.
- *
- * A book's edition link is its title. A comic's is the issue designation on its own, "#404
- * 1987-feb", with the series name in a link of its own beside it, so taking the link text as the
- * title would score a request for "Batman Year One" against "#404" and drop the row. Joined back
- * together in the order a comic is normally named, and scored against the series, which is what a
- * request for one actually states.
+ * What to call the release. A title is joined to its subtitle with a semicolon; shown with the join
+ * spelled out, and scored against the bare title, which is what a request states.
  */
-function readTitle(cell, heading) {
-  const series = firstAnchorText(cell, 'series.php');
-  if (series && heading.startsWith('#')) return { title: `${series} ${heading}`, bookTitle: series };
-
-  // A title is joined to its subtitle with a semicolon. Shown with the join spelled out, and
-  // scored against the bare title, which is what a request states.
+function readTitle(heading) {
   const [bare] = heading.split(';');
   return {
     title: heading.replace(/\s*;\s*/g, ': '),
@@ -526,11 +501,11 @@ function logSearch(host, config, query, found, pages, started) {
 }
 
 function configuredFormats(config, mediaKind) {
-  const raw = mediaKind === 'comic' ? config.settings?.comicFormats : config.settings?.ebookFormats;
-  const fallback = mediaKind === 'comic' ? DEFAULT_COMIC_FORMATS : DEFAULT_EBOOK_FORMATS;
   const allowed = ALLOWED_FORMATS[mediaKind] ?? [];
+  if (allowed.length === 0) return [];
+  const raw = config.settings?.ebookFormats;
 
-  return splitList(typeof raw === 'string' && raw.trim() ? raw : fallback)
+  return splitList(typeof raw === 'string' && raw.trim() ? raw : DEFAULT_EBOOK_FORMATS)
     .map((format) => format.toLowerCase().replace(/^\./, ''))
     .filter((format, index, all) => allowed.includes(format) && all.indexOf(format) === index);
 }

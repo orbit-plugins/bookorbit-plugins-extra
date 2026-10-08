@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "type": "libgen",
-  "version": "1.1.6",
+  "version": "2.0.0",
   "sourceUrl": "https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/indexers/libgen/index.mjs",
-  "sha256": "d443b1379fc18da61481fd9654dc6057558b349573c02aef2ecc3c125e59a167",
-  "signature": "BGpKbTjFcTYalz4xFw9ZLTbW2dlhtdoU7Udt1r/0CwtgfFCAZIz5LV0siwfhSGV+Nvqpg+pGMjvB0A1IomTZBQ=="
+  "sha256": "8e1ad97bd024b232fe2839048ca28e269e1156df66785985939139b71d7d23ad",
+  "signature": "1bm4gTEl2Z7ZTVM00uEUjBSQQoNazNECpHuSZuiLwkuSnAljg3A9saVFe/PrK5nfi0nSkjrzCpYvo4Dc8HdMBQ=="
 }

@@ -38,12 +38,11 @@ const MIN_PER_PAGE = 5;
 const MAX_PER_PAGE = 1000;
 
 /**
- * The E-Books subcategory that actually holds comics, confirmed against the live category list on
- * 2026-08-20. Sent alongside `main_cat` rather than instead of it: whether `tor.cat` narrows a
- * search was never confirmed, and if the tracker ignores it the search is simply the whole E-Books
- * category it already was.
+ * What this source is searched for. Comics are no longer requested by BookOrbit; an older server
+ * that still asks for one is told this source does not carry them rather than sent the E-Books
+ * category, which would answer with novels.
  */
-const COMIC_CATEGORIES = [61];
+const MEDIA_KINDS = ['ebook', 'audiobook'];
 
 /**
  * The tracker's own language numbers, harvested on 2026-08-20 by sampling `language`/`lang_code`
@@ -118,7 +117,7 @@ const seedboxTouchedAt = new Map();
 
 export default {
   apiVersion: 1,
-  version: '1.0.1',
+  version: '2.0.0',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/myanonamouse.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -127,14 +126,13 @@ export default {
   label: 'MyAnonaMouse',
   requiresCredential: true,
   credentialKind: 'sessionId',
-  mediaKinds: ['ebook', 'audiobook', 'comic'],
+  mediaKinds: MEDIA_KINDS,
   usesCategories: true,
   seedsBack: true,
   defaultBaseUrl: 'https://www.myanonamouse.net',
   baseUrlHint: "The tracker's own address, normally https://www.myanonamouse.net",
-  // Its own main category numbers. Comics live inside E-Books rather than in a main category of
-  // their own, so the medium keeps 14 here and the search narrows it with `cat` (COMIC_CATEGORIES).
-  defaultCategories: { ebook: [14], audiobook: [13], comic: [14] },
+  // Its own main category numbers.
+  defaultCategories: { ebook: [14], audiobook: [13] },
   settingsFields: [
     {
       key: 'dynamicSeedbox',
@@ -146,6 +144,7 @@ export default {
   ],
 
   async search(query, config, host) {
+    if (!MEDIA_KINDS.includes(query.mediaKind)) throw host.fail('unsupportedMedium', `does not carry ${query.mediaKind} releases`);
     const found = await runSearch(query, config, host, false);
     if (found.length > 0) return found;
 
@@ -252,8 +251,6 @@ function searchBody(query, config, host, broaden) {
     isbn: true,
     perpage: Math.min(MAX_PER_PAGE, Math.max(MIN_PER_PAGE, query.limit)),
   };
-
-  if (query.mediaKind === 'comic') body.tor.cat = COMIC_CATEGORIES;
 
   const languages = browseLanguages(query.language);
   if (languages) body.tor.browse_lang = languages;

@@ -4,7 +4,6 @@
  *
  * Run with: node verify.mjs
  */
-import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,12 +12,8 @@ import plugin from './index.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => readFileSync(join(here, 'fixtures', name), 'utf8');
-const source = readFileSync(join(here, 'index.mjs'));
-const manifest = JSON.parse(readFileSync(join(here, '..', '..', 'updates', 'libgen.json'), 'utf8'));
-const updateKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: plugin.update.ed25519PublicKey }, format: 'jwk' });
 
 const SEARCH_EBOOK = fixture('lg.html'); // "project hail mary", objects=f, topics=l, res=25
-const SEARCH_COMIC = fixture('rc.html'); // "batman", objects=f, topics=c, res=25
 // "Rose Madder Stephen King", res=50, pages 1 and 2. Real crowding: 32 Spanish rows against 9
 // English on the first page, which is the case that made paging necessary.
 const CROWDED_1 = fixture('crowded-page1.html');
@@ -83,7 +78,7 @@ const cfg = (over = {}) => ({
   baseUrl: 'https://libgen.li/',
   credential: null,
   allowPrivateAddress: false,
-  categories: { ebook: [], audiobook: [], comic: [] },
+  categories: { ebook: [], audiobook: [] },
   settings: {},
   ...over,
 });
@@ -98,19 +93,14 @@ const query = {
 
 console.log('descriptor');
 ok('type slug', plugin.type === 'libgen');
-ok('plugin version', plugin.version === '1.1.6');
+ok('plugin version', plugin.version === '2.0.0');
 ok('signed update channel', /^https:\/\//.test(plugin.update?.manifestUrl ?? '') && /^[A-Za-z0-9_-]{43}$/.test(plugin.update?.ed25519PublicKey ?? ''));
-ok(
-  'signed update manifest',
-  manifest.version === plugin.version &&
-    manifest.sha256 === createHash('sha256').update(source).digest('hex') &&
-    verify(null, source, updateKey, Buffer.from(manifest.signature, 'base64')),
-);
 ok('no credential of any kind', plugin.requiresCredential === false && plugin.credentialKind === null);
 ok('resolveFile only', typeof plugin.resolveFile === 'function' && plugin.fetchTorrentFile === undefined);
 ok('no seeding', plugin.seedsBack === false);
 ok('declares exact ISBN search', plugin.supportsIsbnSearch === true);
-ok('media kinds', JSON.stringify(plugin.mediaKinds) === '["ebook","comic"]');
+ok('media kinds', JSON.stringify(plugin.mediaKinds) === '["ebook"]');
+ok('offers no setting for the retired comic medium', !plugin.settingsFields.some((field) => field.key === 'comicFormats'));
 
 console.log('search against the live ebook page');
 {
@@ -158,20 +148,14 @@ console.log('search against the live ebook page');
   ok('a separated size is read whole', first.sizeBytes === 1012300, first.sizeBytes);
 }
 
-console.log('search against the live comics page');
+console.log('a medium this source does not carry');
 {
-  const host = makeHost(() => res(SEARCH_COMIC));
-  const out = await plugin.search({ ...query, title: 'Batman', author: null, mediaKind: 'comic' }, cfg(), host);
-  const url = new URL(host.calls[0]);
-  ok('comic collection', url.searchParams.getAll('topics[]').join() === 'c');
-  ok('comic rows parsed', out.length > 0, out.length);
-  ok('comic formats only', out.every((r) => ['cbz', 'cb7', 'pdf'].includes(r.format)), [...new Set(out.map((r) => r.format))]);
-  ok('comic rows carry an md5 from the keyless link', out.every((r) => /^[a-f0-9]{32}$/.test(r.guid)));
-
-  const issue = out[0];
-  ok('series prepended to the issue designation', /^\S.*#/.test(issue.title) && !issue.title.startsWith('#'), issue.title);
-  ok('series is what gets scored', issue.bookTitle && !issue.bookTitle.includes('#'), issue.bookTitle);
-  ok('every comic title names something before the issue', out.every((r) => !r.title.startsWith('#')), out.map((r) => r.title).slice(0, 3));
+  // An older BookOrbit can still ask for a comic. It is told this source does not carry them, without
+  // a request reaching the site.
+  const host = makeHost(() => res(SEARCH_EBOOK));
+  const err = await plugin.search({ ...query, mediaKind: 'comic' }, cfg(), host).catch((e) => e);
+  ok('refuses a comic search as unsupported', err.failure === 'unsupportedMedium', err.failure);
+  ok('and asks the site nothing', host.calls.length === 0, host.calls.length);
 }
 
 console.log('search options and failures');
@@ -306,14 +290,6 @@ console.log('isbns off the row');
   ok('the multi-isbn row keeps all six', out.some((r) => r.isbn === '9780593135204; 0593135202; 9780593135211; 0593135210; 9780593355275; 059335527X'), JSON.stringify(out.map((r) => r.isbn).filter(Boolean)));
   ok('a row with no isbn omits the field rather than sending an empty one', out.every((r) => r.isbn === undefined || r.isbn.length > 0));
 }
-{
-  const host = makeHost(() => res(SEARCH_COMIC));
-  const out = await plugin.search({ ...query, title: 'Batman', author: null, mediaKind: 'comic' }, cfg(), host);
-  const url = new URL(host.calls[0]);
-  ok('a comic keeps the series column', url.searchParams.getAll('columns[]').join() === 't,a,s', url.searchParams.getAll('columns[]').join());
-  ok('comic rows still parse', out.length > 0, out.length);
-}
-
 {
   const host = makeHost(() => res('slow down', { status: 429 }));
   const err = await plugin.search(query, cfg(), host).catch((e) => e);

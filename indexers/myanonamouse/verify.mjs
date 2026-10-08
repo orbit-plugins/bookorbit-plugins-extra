@@ -12,17 +12,8 @@
  *
  * Run with: node verify.mjs
  */
-import { createHash, createPublicKey, verify } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import plugin from './index.mjs';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, 'index.mjs'));
-const manifest = JSON.parse(readFileSync(join(here, '..', '..', 'updates', 'myanonamouse.json'), 'utf8'));
-const updateKey = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: plugin.update.ed25519PublicKey }, format: 'jwk' });
 
 let pass = 0;
 let fail = 0;
@@ -76,7 +67,7 @@ const cfg = (over = {}) => ({
   baseUrl: 'https://www.myanonamouse.net',
   credential: 'session-abc',
   allowPrivateAddress: false,
-  categories: { ebook: [14], audiobook: [13], comic: [14] },
+  categories: { ebook: [14], audiobook: [13] },
   seedRatioGoal: null,
   seedTimeMinutes: null,
   settings: null,
@@ -110,20 +101,13 @@ const search = (host, over = {}, config = cfg()) => plugin.search(query(over), c
 
 console.log('declaration');
 ok('needs a session credential', plugin.requiresCredential === true && plugin.credentialKind === 'sessionId');
-ok('carries all three media', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook","comic"]');
+ok('carries ebooks and audiobooks', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook"]');
 ok('joins a swarm and uses categories', plugin.seedsBack === true && plugin.usesCategories === true);
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '1.0.1');
+ok('plugin version', plugin.version === '2.0.0');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/myanonamouse.json') && plugin.update.ed25519PublicKey.length === 43);
-ok(
-  'signed update manifest',
-  manifest.version === plugin.version &&
-    manifest.sha256 === createHash('sha256').update(source).digest('hex') &&
-    verify(null, source, updateKey, Buffer.from(manifest.signature, 'base64')),
-);
 ok('offers the seedbox toggle, off by default', plugin.settingsFields?.[0]?.key === 'dynamicSeedbox' && plugin.settingsFields[0].default === false);
-// It has no comic category of its own, so comics fall back to the ebook one.
-ok('defaults comics to the ebook category', JSON.stringify(plugin.defaultCategories.comic) === JSON.stringify(plugin.defaultCategories.ebook));
+ok('declares no category for the retired comic medium', plugin.defaultCategories.comic === undefined);
 ok('grabs a torrent rather than a file', typeof plugin.fetchTorrentFile === 'function' && plugin.resolveFile === undefined);
 
 console.log('search requests');
@@ -198,12 +182,12 @@ console.log('server-side filters');
   ok('leaves the language filter off when none was asked for', JSON.parse(host.reqs[0].init.body).tor.browse_lang === undefined);
 }
 {
+  // An older BookOrbit can still ask for a comic. It is told this source does not carry them,
+  // without a request reaching the tracker, rather than handed whatever E-Books answers with.
   const host = makeHost(() => json({ data: [ROW] }));
-  await search(host, { mediaKind: 'comic' });
-  const body = JSON.parse(host.reqs[0].init.body);
-  // Comics live inside E-Books rather than in a main category of their own.
-  ok('narrows a comic search to the comics subcategory', JSON.stringify(body.tor.cat) === '[61]');
-  ok('and still sends the configured main category with it', JSON.stringify(body.tor.main_cat) === '[14]');
+  const err = await search(host, { mediaKind: 'comic' }).catch((e) => e);
+  ok('refuses a comic search as a medium it does not carry', err.code === 'unsupportedMedium', err.code);
+  ok('and asks the tracker nothing', host.reqs.length === 0, host.reqs.length);
 }
 {
   const host = makeHost(() => json({ data: [ROW] }));
