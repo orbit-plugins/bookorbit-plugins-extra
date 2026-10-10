@@ -104,13 +104,29 @@ ok('needs a session credential', plugin.requiresCredential === true && plugin.cr
 ok('carries ebooks and audiobooks', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook"]');
 ok('joins a swarm and uses categories', plugin.seedsBack === true && plugin.usesCategories === true);
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '2.0.0');
+ok('plugin version', plugin.version === '2.0.1');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/myanonamouse.json') && plugin.update.ed25519PublicKey.length === 43);
 ok('offers the seedbox toggle, off by default', plugin.settingsFields?.[0]?.key === 'dynamicSeedbox' && plugin.settingsFields[0].default === false);
-ok('declares no category for the retired comic medium', plugin.defaultCategories.comic === undefined);
+{
+  // BookOrbit v3.2.0 maps all three arrays even when the source does not carry comics.
+  try {
+    const draft = Object.fromEntries(['ebook', 'audiobook', 'comic'].map((kind) => [kind, plugin.defaultCategories[kind].map(String)]));
+    ok('opens the category draft on older BookOrbit releases', JSON.stringify(draft) === '{"ebook":["14"],"audiobook":["13"],"comic":[]}');
+  } catch (error) {
+    ok('opens the category draft on older BookOrbit releases', false, error.message);
+  }
+}
 ok('grabs a torrent rather than a file', typeof plugin.fetchTorrentFile === 'function' && plugin.resolveFile === undefined);
 
 console.log('search requests');
+for (const format of ['epub', 'cbz', 'cbr', 'cb7', 'cbx', 'pdf cbz']) {
+  const host = makeHost(() => json({ data: [{ ...ROW, name: 'Saga - Brian K Vaughan', filetype: format }] }));
+  const found = await search(host, { title: 'Saga', author: 'Brian K Vaughan', mediaKind: 'ebook' });
+  const body = JSON.parse(host.reqs[0].init.body);
+  ok(`searches books and comics together for ${format}`, JSON.stringify(body.tor.main_cat) === '[14]' && body.tor.cat === undefined);
+  ok(`preserves the release format for ${format}`, found.length === 1 && found[0].format === format);
+  ok(`uses only the search endpoint for ${format}`, host.reqs.length === 1 && host.reqs[0].url.endsWith('/tor/js/loadSearchJSONbasic.php'));
+}
 {
   const host = makeHost(() => json({ data: [ROW] }));
   await search(host);
