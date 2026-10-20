@@ -91,6 +91,8 @@ const ISBN_PASS_SHARE = 0.5;
 const SEARCH_BUDGET_MS = 15_000;
 
 const MD5_IN_HREF = /(?:ads|get)\.php\?md5=([a-f0-9]{32})/i;
+/** The row's own file page: this exact file's edition, publisher and ISBNs, which a request is checked against. */
+const FILE_ID_IN_HREF = /href="\/?file\.php\?id=(\d+)"/i;
 
 /**
  * The ISBNs the catalogue holds against a row, written into the only green font on the page and
@@ -187,7 +189,7 @@ const ISO_639_2_TO_1 = {
 
 export default {
   apiVersion: 1,
-  version: '2.0.0',
+  version: '2.1.0',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/libgen.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -341,10 +343,13 @@ function toRelease(row, config, formats) {
   const publishedAt = parseAdded(cellText(cells[YEAR_CELL]));
 
   const isbn = rowIsbns(cells[TITLE_CELL]);
+  const fileId = FILE_ID_IN_HREF.exec(row)?.[1];
 
   return {
     guid: md5,
     ...readTitle(heading),
+    // A host older than the field ignores it.
+    ...(fileId ? { infoUrl: `${baseOf(config)}/file.php?id=${fileId}` } : {}),
     sizeBytes: parseSize(cellText(cells[SIZE_CELL])),
     // Not zero. Nothing here publishes swarm counts, and a zero would be read as a dead torrent
     // and filtered out.

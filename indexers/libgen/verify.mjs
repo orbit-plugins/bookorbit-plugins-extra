@@ -93,7 +93,7 @@ const query = {
 
 console.log('descriptor');
 ok('type slug', plugin.type === 'libgen');
-ok('plugin version', plugin.version === '2.0.0');
+ok('plugin version', plugin.version === '2.1.0');
 ok('signed update channel', /^https:\/\//.test(plugin.update?.manifestUrl ?? '') && /^[A-Za-z0-9_-]{43}$/.test(plugin.update?.ed25519PublicKey ?? ''));
 ok('no credential of any kind', plugin.requiresCredential === false && plugin.credentialKind === null);
 ok('resolveFile only', typeof plugin.resolveFile === 'function' && plugin.fetchTorrentFile === undefined);
@@ -126,6 +126,7 @@ console.log('search against the live ebook page');
   ok('language mapped to a code', first.language === 'en', first.language);
   ok('seeders null not zero', first.seeders === null && first.leechers === null);
   ok('one file per release', first.primaryFileCount === 1);
+  ok('links the file page on the configured mirror', /^https:\/\/libgen\.li\/file\.php\?id=\d+$/.test(first.infoUrl ?? ''), first.infoUrl);
   ok('every row states a usable format', out.every((r) => ['epub', 'mobi', 'azw', 'azw3', 'fb2', 'djvu'].includes(r.format)));
   ok('every row carries an md5', out.every((r) => /^[a-f0-9]{32}$/.test(r.guid)));
   ok('no row has an empty title', out.every((r) => r.title.length > 0));

@@ -12,6 +12,8 @@
 
 const SEARCH_PATH = '/tor/js/loadSearchJSONbasic.php';
 const DOWNLOAD_PATH = '/tor/download.php';
+/** A torrent's page, with the description, the file list and the comments an approver checks it by. */
+const TORRENT_PAGE_PATH = '/t/';
 /** The cheapest authenticated endpoint, used only to keep the session from lapsing. */
 const KEEPALIVE_PATH = '/jsonLoad.php';
 /**
@@ -116,7 +118,7 @@ const seedboxTouchedAt = new Map();
 
 export default {
   apiVersion: 1,
-  version: '2.0.1',
+  version: '2.1.0',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/myanonamouse.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -411,6 +413,7 @@ function toRelease(row, config) {
 
   const downloadUrl = new URL(config.baseUrl.replace(/\/+$/, '') + DOWNLOAD_PATH);
   downloadUrl.searchParams.set('tid', id);
+  const infoUrl = new URL(config.baseUrl.replace(/\/+$/, '') + TORRENT_PAGE_PATH + encodeURIComponent(id));
 
   const format = (row.filetype ?? row.filetypes)?.trim().toLowerCase();
   const author = readAuthor(row.author_info);
@@ -422,6 +425,8 @@ function toRelease(row, config) {
     guid: id,
     title,
     downloadUrl: downloadUrl.href,
+    // A host older than the field ignores it.
+    infoUrl: infoUrl.href,
     sizeBytes: parseSize(row.size),
     seeders: toNumber(row.seeders),
     leechers: toNumber(row.leechers),

@@ -104,7 +104,7 @@ ok('needs a session credential', plugin.requiresCredential === true && plugin.cr
 ok('carries ebooks and audiobooks', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook"]');
 ok('joins a swarm and uses categories', plugin.seedsBack === true && plugin.usesCategories === true);
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '2.0.1');
+ok('plugin version', plugin.version === '2.1.0');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/myanonamouse.json') && plugin.update.ed25519PublicKey.length === 43);
 ok('offers the seedbox toggle, off by default', plugin.settingsFields?.[0]?.key === 'dynamicSeedbox' && plugin.settingsFields[0].default === false);
 {
@@ -256,6 +256,7 @@ console.log('reading a row');
   ok('accepts the example spelling of the title', r.title === 'Andy Weir - Project Hail Mary [M4B]');
   ok('accepts the example spelling of the format', r.format === 'm4b');
   ok('builds the download link from the id', r.downloadUrl === 'https://www.myanonamouse.net/tor/download.php?tid=481516');
+  ok('links the torrent page, which needs no credential in the address', r.infoUrl === 'https://www.myanonamouse.net/t/481516', r.infoUrl);
   ok('reads the swarm counts', r.seeders === 42 && r.leechers === 3);
   ok('reads the language', r.language === 'ENG');
   ok('reads the author out of the id-keyed map', r.author === 'Andy Weir');
