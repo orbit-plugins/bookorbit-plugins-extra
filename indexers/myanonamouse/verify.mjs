@@ -104,7 +104,7 @@ ok('needs a session credential', plugin.requiresCredential === true && plugin.cr
 ok('carries ebooks and audiobooks', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook"]');
 ok('joins a swarm and uses categories', plugin.seedsBack === true && plugin.usesCategories === true);
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '2.1.0');
+ok('plugin version', plugin.version === '2.1.1');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/myanonamouse.json') && plugin.update.ed25519PublicKey.length === 43);
 ok('offers the seedbox toggle, off by default', plugin.settingsFields?.[0]?.key === 'dynamicSeedbox' && plugin.settingsFields[0].default === false);
 {
@@ -452,6 +452,55 @@ console.log('session rotation');
   const host = makeHost(() => res('nope', { status: 403, headers: [['set-cookie', 'mam_id=rotated-on-refusal; Path=/']] }));
   await search(host).catch(() => {});
   ok('captures a rotation that arrives with a refusal', host.saved[0] === 'rotated-on-refusal', host.saved);
+}
+{
+  // Saving a rotation can lose a race, leaving the stored value a step behind the live session.
+  // An empty answer broadens into a second request, so one search rotates twice here.
+  const config = cfg();
+  let turn = 0;
+  await search(makeHost(() => json({ data: [] }, { headers: [['set-cookie', `mam_id=rotated-${++turn}; Path=/`]] })), {}, config);
+  const host = makeHost(() => json({ data: [] }));
+  await search(host, {}, { ...config, credential: 'rotated-1' });
+  ok('keeps the live session over a stored value it already passed through', host.reqs[0].init.headers.Cookie === 'mam_id=rotated-2');
+}
+
+console.log('forget()');
+{
+  const config = cfg();
+  await search(makeHost(() => json({ data: [] }, { headers: [['set-cookie', 'mam_id=rotated-xyz; Path=/']] })), {}, config);
+  plugin.forget(config.id);
+  // The stored value is one the dropped session started from, so only forget can explain the switch.
+  const host = makeHost(() => json({ data: [] }));
+  await search(host, {}, config);
+  ok('drops the held session when told to', host.reqs[0].init.headers.Cookie === 'mam_id=session-abc', host.reqs[0].init.headers);
+}
+{
+  const config = cfg({ settings: { dynamicSeedbox: true } });
+  const host = makeHost((url) => (url.includes('dynamicSeedbox') ? json({ Success: true, msg: 'Completed' }) : bencode()));
+  await plugin.fetchTorrentFile({ downloadUrl: 'https://x/1' }, config, host);
+  plugin.forget(config.id);
+  await plugin.fetchTorrentFile({ downloadUrl: 'https://x/2' }, config, host);
+  ok('gives a new session its own seedbox attempt within the hour', host.calls.filter((u) => u.includes('dynamicSeedbox')).length === 2, host.calls);
+}
+{
+  // BookOrbit releases older than forget never call it, so a pasted credential has to win on its own.
+  const config = cfg();
+  await search(makeHost(() => json({ data: [] }, { headers: [['set-cookie', 'mam_id=rotated-xyz; Path=/']] })), {}, config);
+  const host = makeHost(() => json({ data: [] }));
+  await search(host, {}, { ...config, credential: 'pasted-new' });
+  ok('uses a pasted credential on a host that never calls forget', host.reqs[0].init.headers.Cookie === 'mam_id=pasted-new', host.reqs[0].init.headers);
+}
+{
+  // The operator saves while a search is still waiting on the tracker, which then rotates the old session.
+  const config = cfg();
+  const inFlight = makeHost(() => {
+    plugin.forget(config.id);
+    return json({ data: [] }, { headers: [['set-cookie', 'mam_id=rotated-late; Path=/']] });
+  });
+  await search(inFlight, {}, config);
+  const host = makeHost(() => json({ data: [] }));
+  await search(host, {}, { ...config, credential: 'pasted-new' });
+  ok('does not let a late rotation of the old session outrank a pasted one', host.reqs[0].init.headers.Cookie === 'mam_id=pasted-new', host.reqs[0].init.headers);
 }
 
 console.log('fetchTorrentFile()');

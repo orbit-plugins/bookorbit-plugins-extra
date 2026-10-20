@@ -111,14 +111,22 @@ const LANGUAGE_IDS = {
  */
 const UNKNOWN_LANGUAGE_ID = 47;
 
-/** The live session per indexer, which the tracker rotates out from under the stored one. */
+/**
+ * The live session per indexer, which the tracker rotates out from under the stored one, and the
+ * values it has passed through since the stored credential it started from.
+ */
 const sessions = new Map();
+/**
+ * The stored credential only lags the live session by the rotations still being saved, so a stored
+ * value outside this many recent ones was not produced here.
+ */
+const MAX_SESSION_LINEAGE = 16;
 /** When the seedbox registration was last attempted per indexer, to respect the hourly limit. */
 const seedboxTouchedAt = new Map();
 
 export default {
   apiVersion: 1,
-  version: '2.1.0',
+  version: '2.1.1',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/myanonamouse.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -207,7 +215,21 @@ export default {
     // the same tick rather than only when somebody happens to grab something.
     await authorizeSeedbox(config, host);
   },
+
+  /**
+   * Called when an operator changes the credential or the address. The held session would
+   * otherwise outrank the one just pasted until the process restarts.
+   */
+  forget(indexerId) {
+    forgetIndexer(indexerId);
+  },
 };
+
+function forgetIndexer(indexerId) {
+  sessions.delete(indexerId);
+  // A new session may carry the dynamic seedbox permission the old one lacked.
+  seedboxTouchedAt.delete(indexerId);
+}
 
 async function runSearch(query, config, host, broaden) {
   // The host applies its own deadline to every call, so `signal` is not forwarded.
@@ -272,8 +294,19 @@ function call(config, host, path, init) {
   return fetchWithSession(config, host, `${base}${path}`, init);
 }
 
+/**
+ * Hosts older than `forget` never say a credential was replaced, and a request already in flight
+ * can rotate a session after `forget` ran. Either way the stored credential is one this session
+ * never passed through, which is what makes the held one give way.
+ */
+function liveSession(config) {
+  const held = sessions.get(config.id);
+  if (held && !held.lineage.includes(config.credential)) forgetIndexer(config.id);
+  return sessions.get(config.id)?.live ?? config.credential ?? '';
+}
+
 async function fetchWithSession(config, host, url, init) {
-  const session = sessions.get(config.id) ?? config.credential ?? '';
+  const session = liveSession(config);
 
   const response = await host.fetch(url, {
     ...init,
@@ -296,8 +329,10 @@ async function fetchWithSession(config, host, url, init) {
 /** The tracker reissues `mam_id` as it pleases; the new one has to outlive this process. */
 async function captureRotatedSession(config, host, response) {
   const rotated = extractCookie(response, 'mam_id');
-  if (!rotated || rotated === (sessions.get(config.id) ?? config.credential)) return;
-  sessions.set(config.id, rotated);
+  const held = sessions.get(config.id);
+  if (!rotated || rotated === (held?.live ?? config.credential)) return;
+  const lineage = [...(held?.lineage ?? [config.credential]), rotated].slice(-MAX_SESSION_LINEAGE);
+  sessions.set(config.id, { live: rotated, lineage });
   await host.saveCredential(rotated);
 }
 
