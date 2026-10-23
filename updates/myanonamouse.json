@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "type": "myanonamouse",
-  "version": "2.1.1",
-  "sourceUrl": "https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/1369eed3781ff4eac924f3a5f7a3538751332c57/indexers/myanonamouse/index.mjs",
-  "sha256": "02aa96deb25fc66b3020cdd543caf63ed00dff7e581c265d004d3d3d58dbe260",
-  "signature": "4azUsGmi8I+9xdaIi0a8TInlBXXXvnMrsp0wxF5cvzbFsSlMOyQdgOFU8eYUL6Bp3fKc1sm14qsK/zBMcvfRCA=="
+  "version": "2.1.2",
+  "sourceUrl": "https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/8c260eb237e55a80bab370b04b76ecbccfabcd79/indexers/myanonamouse/index.mjs",
+  "sha256": "3d875d4381a3bc817c6add8f02b5877f09a356d0d7c9c07733e66b9ccffa4792",
+  "signature": "nHX+9I9oV3NZN/oHUk/f6ePjdUR3LTnX73a/ONkDx5qVtAAFqsmc/xXcOrsY/d3qmBcrFfuSlwUVDIPqCb4tAg=="
 }
