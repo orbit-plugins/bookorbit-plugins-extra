@@ -104,7 +104,7 @@ ok('needs a session credential', plugin.requiresCredential === true && plugin.cr
 ok('carries ebooks and audiobooks', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook"]');
 ok('joins a swarm and uses categories', plugin.seedsBack === true && plugin.usesCategories === true);
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '2.1.1');
+ok('plugin version', plugin.version === '2.1.2');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/myanonamouse.json') && plugin.update.ed25519PublicKey.length === 43);
 ok('offers the seedbox toggle, off by default', plugin.settingsFields?.[0]?.key === 'dynamicSeedbox' && plugin.settingsFields[0].default === false);
 {
@@ -539,6 +539,41 @@ console.log('dynamic seedbox');
   await plugin.fetchTorrentFile({ downloadUrl: 'https://x/1' }, cfg({ settings: { dynamicSeedbox: true } }), host);
   // Before the fetch, because the announce follows within seconds of the client getting the file.
   ok('registers the address before fetching the torrent', host.calls[0].includes('dynamicSeedbox'), host.calls);
+}
+{
+  // The main host answers the registration with a 403 that reads exactly like a rejected session.
+  const seedboxUrl = 'https://t.myanonamouse.net/json/dynamicSeedbox.php';
+  for (const baseUrl of ['https://www.myanonamouse.net', 'https://www.myanonamouse.net/', 'https://myanonamouse.net', 'https://t.myanonamouse.net']) {
+    const host = makeHost((url) => (url.includes('dynamicSeedbox') ? json({ Success: true, msg: 'Completed' }) : bencode()));
+    const config = cfg({ baseUrl, settings: { dynamicSeedbox: true } });
+    await plugin.fetchTorrentFile({ downloadUrl: 'https://www.myanonamouse.net/tor/download.php?tid=1' }, config, host);
+    ok(`registers on the seedbox host for ${baseUrl}`, host.calls[0] === seedboxUrl, host.calls);
+    ok(`and sends the session there for ${baseUrl}`, host.reqs[0].init.headers.Cookie === 'mam_id=session-abc', host.reqs[0].init);
+  }
+}
+{
+  // Only that one call moves: search and the torrent stay on the configured host.
+  const host = makeHost((url) =>
+    url.includes('dynamicSeedbox') ? json({ Success: true, msg: 'Completed' }) : url.includes('loadSearch') ? json({ data: [ROW] }) : bencode(),
+  );
+  const config = cfg({ settings: { dynamicSeedbox: true } });
+  const [release] = await plugin.search(query(), config, host);
+  await plugin.fetchTorrentFile(release, config, host);
+  ok('keeps search on the configured host', host.calls[0].startsWith('https://www.myanonamouse.net/tor/'), host.calls);
+  ok('keeps the torrent download on the configured host', host.calls.at(-1).startsWith('https://www.myanonamouse.net/tor/download.php'), host.calls);
+}
+{
+  // Any other base is an operator's proxy, which routes the registration itself.
+  const host = makeHost((url) => (url.includes('dynamicSeedbox') ? json({ Success: true, msg: 'Completed' }) : bencode()));
+  const config = cfg({ baseUrl: 'https://mam.proxy.example/mam/', settings: { dynamicSeedbox: true } });
+  await plugin.fetchTorrentFile({ downloadUrl: 'https://mam.proxy.example/mam/tor/download.php?tid=1' }, config, host);
+  ok('registers through a custom base unchanged', host.calls[0] === 'https://mam.proxy.example/mam/json/dynamicSeedbox.php', host.calls);
+}
+{
+  // A suffix match on the bare name would send a lookalike domain the tracker's session.
+  const host = makeHost((url) => (url.includes('dynamicSeedbox') ? json({ Success: true, msg: 'Completed' }) : bencode()));
+  await plugin.fetchTorrentFile({ downloadUrl: 'https://x/1' }, cfg({ baseUrl: 'https://notmyanonamouse.net', settings: { dynamicSeedbox: true } }), host);
+  ok('does not treat a lookalike domain as the tracker', host.calls[0] === 'https://notmyanonamouse.net/json/dynamicSeedbox.php', host.calls);
 }
 {
   const config = cfg({ settings: { dynamicSeedbox: true } });

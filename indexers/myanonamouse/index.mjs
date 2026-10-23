@@ -22,6 +22,12 @@ const KEEPALIVE_PATH = '/jsonLoad.php';
  * checks against this separate registration and otherwise rejects as "Unrecognized host/PassKey".
  */
 const SEEDBOX_PATH = '/json/dynamicSeedbox.php';
+/**
+ * The only host that serves the registration. The main host answers it with a 403 that reads
+ * exactly like a rejected session, and this one 404s every other path the plugin calls.
+ */
+const SEEDBOX_ORIGIN = 'https://t.myanonamouse.net';
+const TRACKER_DOMAIN = 'myanonamouse.net';
 /** The tracker will not move the registration more than once an hour, so neither do we. */
 const SEEDBOX_MIN_INTERVAL_MS = 60 * 60 * 1000;
 /** Answers that mean the registration is already where it should be, not that anything failed. */
@@ -126,7 +132,7 @@ const seedboxTouchedAt = new Map();
 
 export default {
   apiVersion: 1,
-  version: '2.1.1',
+  version: '2.1.2',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/myanonamouse.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -288,10 +294,16 @@ function browseLanguages(language) {
   return ids ? [...ids, UNKNOWN_LANGUAGE_ID] : null;
 }
 
-function call(config, host, path, init) {
+function call(config, host, path, init, base = config.baseUrl.replace(/\/+$/, '')) {
   if (!config.credential) throw host.fail('unauthorized', 'no session id is configured');
-  const base = config.baseUrl.replace(/\/+$/, '');
   return fetchWithSession(config, host, `${base}${path}`, init);
+}
+
+/** A base on the tracker's own domain moves to the seedbox host; any other is a proxy left to route it. */
+function seedboxBase(config) {
+  const base = config.baseUrl.replace(/\/+$/, '');
+  const { hostname } = new URL(base);
+  return hostname === TRACKER_DOMAIN || hostname.endsWith(`.${TRACKER_DOMAIN}`) ? SEEDBOX_ORIGIN : base;
 }
 
 /**
@@ -352,7 +364,7 @@ async function authorizeSeedbox(config, host) {
   if (last !== undefined && Date.now() - last < SEEDBOX_MIN_INTERVAL_MS) return;
 
   try {
-    const response = await call(config, host, SEEDBOX_PATH, { method: 'GET' });
+    const response = await call(config, host, SEEDBOX_PATH, { method: 'GET' }, seedboxBase(config));
     // Stamped on an answer rather than on an attempt: a call that never reached the tracker has
     // not used up the hour, and holding the next grab off for one would be the wrong trade.
     seedboxTouchedAt.set(config.id, Date.now());
