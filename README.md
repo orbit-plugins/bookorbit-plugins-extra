@@ -7,10 +7,11 @@ Every plugin publishes signed updates. BookOrbit checks an update's SHA-256 and 
 signature against the public key the installed copy pins before offering or automatically installing
 it. Releasing one is a version bump; see [Releasing](#releasing).
 
-| Plugin            | Media            | Credential         | Grabs        |
-| ----------------- | ---------------- | ------------------ | ------------ |
-| **libgen**        | ebook            | none               | direct file  |
-| **myanonamouse**  | ebook, audiobook | session id         | torrent file |
+| Plugin            | Media            | Credential          | Grabs        |
+| ----------------- | ---------------- | ------------------- | ------------ |
+| **libgen**        | ebook            | none                | direct file  |
+| **myanonamouse**  | ebook, audiobook | session id          | torrent file |
+| **zlibrary**      | ebook            | session id or login | direct file  |
 
 Which sources you point BookOrbit at, and whether you are entitled to what they hold, is your
 decision and your responsibility.
@@ -54,6 +55,11 @@ because other-language rows crowd out common titles on page one.
 client. The session is ASN locked and rotates per request, so the plugin saves the rotated value
 back through the host. The dynamic seedbox toggle registers the address BookOrbit connects from,
 which is only correct when your download client shares it.
+
+**zlibrary** talks to `/eapi`, failing over across configured mirrors and domains learned from
+`/eapi/info/domains`. Searching is anonymous; resolving a file spends one of the account's daily
+downloads, authenticated with either `remix_userid`/`remix_userkey` cookies or an e-mail and
+password logged in once and held in memory. Discovered domains are only ever searched anonymously.
 
 ## Verifying
 
