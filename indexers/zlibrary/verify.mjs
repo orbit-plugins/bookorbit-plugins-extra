@@ -101,7 +101,7 @@ ok('needs a session credential', plugin.requiresCredential === true && plugin.cr
 ok('carries ebooks only', JSON.stringify(plugin.mediaKinds) === '["ebook"]');
 ok('serves the file itself', typeof plugin.resolveFile === 'function' && plugin.fetchTorrentFile === undefined);
 ok('seeds nothing and uses no categories', plugin.seedsBack === false && plugin.usesCategories === false);
-ok('defaults to a mirror, not a walled main domain', plugin.defaultBaseUrl === 'https://z-lib.gd');
+ok('defaults to a mirror, not a walled main domain', plugin.defaultBaseUrl === 'https://z-lib.by');
 ok('offers formats, an e-mail and mirrors', plugin.settingsFields.map((f) => f.key).join() === 'ebookFormats,email,mirrors');
 
 console.log('search requests');
@@ -205,14 +205,14 @@ console.log('mirror failover');
   const host = makeHost((url) => (url.startsWith('https://z-lib.gd/') ? unreachable() : searchAnswer([BOOK])));
   const config = cfg();
   const found = await plugin.search(query(), config, host);
-  ok('moves past an unreachable base URL', found.length === 1 && host.calls[1].startsWith('https://z-lib.gl/'));
+  ok('moves past an unreachable base URL', found.length === 1 && host.calls[1].startsWith('https://z-lib.by/'));
   await plugin.search(query(), config, host);
-  ok('starts the next call at the mirror that answered', host.calls[2].startsWith('https://z-lib.gl/'));
+  ok('starts the next call at the mirror that answered', host.calls[2].startsWith('https://z-lib.by/'));
 }
 {
   const host = makeHost((url) => (url.startsWith('https://z-library.sk/') ? wall() : searchAnswer([BOOK])));
   const found = await plugin.search(query(), cfg({ baseUrl: 'https://z-library.sk' }), host);
-  ok('treats a redirect as a wall and moves on', found.length === 1 && host.calls.length === 2 && host.calls[1].startsWith('https://z-lib.gd/'));
+  ok('treats a redirect as a wall and moves on', found.length === 1 && host.calls.length === 2 && host.calls[1].startsWith('https://z-lib.by/'));
 }
 {
   const host = makeHost((url) =>
@@ -300,7 +300,24 @@ console.log('session');
   const result = await plugin.test(cfg(), host);
   ok('tests against the profile', host.calls[0] === 'https://z-lib.gd/eapi/user/profile' && host.reqs[0].init.method === 'GET');
   ok('sends the session as cookies', host.reqs[0].init.headers.Cookie === 'remix_userid=12345678; remix_userkey=0123456789abcdef0123456789abcdef');
+  ok('and probes search without the session', host.calls[1] === 'https://z-lib.gd/eapi/book/search' && host.reqs[1].init.headers.Cookie === undefined);
   ok('reports the daily allowance', result.success === true && result.indexerName === 'Z-Library (7 of 10 downloads left today)', result);
+}
+{
+  // Main domains answer `/eapi/user/profile` while redirecting `/eapi/book/search` into DiamWall.
+  const host = makeHost((url) => (url.endsWith('/eapi/user/profile') ? json({ success: 1, user: {} }) : wall()));
+  const result = await plugin.test(cfg({ baseUrl: 'https://z-lib.sk', settings: { mirrors: 'https://z-library.sk' } }), host);
+  ok('fails the test when every mirror walls search behind a redirect', result.success === false && /z-lib\.sk answered 307/.test(result.error), result);
+}
+{
+  const host = makeHost((url) => {
+    if (url.endsWith('/eapi/user/profile')) return json({ success: 1, user: {} });
+    return url.startsWith('https://z-lib.sk/') ? wall() : searchAnswer([BOOK]);
+  });
+  const config = cfg({ baseUrl: 'https://z-lib.sk', settings: { mirrors: 'https://z-lib.by' } });
+  const result = await plugin.test(config, host);
+  await plugin.search(query(), config, host);
+  ok('switches to a fallback mirror when the base URL walls search during test', result.success === true && host.calls.at(-1) === 'https://z-lib.by/eapi/book/search', host.calls);
 }
 {
   const host = makeHost(() => json({ success: 1, user: {} }));
@@ -347,6 +364,7 @@ const profileAnswer = () => json({ success: 1, user: { downloads_today: 1, downl
   let profiles = 0;
   const host = makeHost((url) => {
     if (url.endsWith('/eapi/user/login')) return loginAnswer();
+    if (url.endsWith('/eapi/book/search')) return searchAnswer([BOOK]);
     profiles += 1;
     return profiles === 2 ? json({ success: 0, error: 'Please login' }, { status: 400 }) : profileAnswer();
   });

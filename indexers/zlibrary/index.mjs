@@ -23,10 +23,10 @@ const DOMAINS_PATH = '/eapi/info/domains';
 const filePath = (id, hash) => `/eapi/book/${id}/${hash}/file`;
 
 /**
- * Mirrors that served the API to a plain client when checked on 2026-10-19. Only a starting point:
+ * Mirrors that served the API to a plain client when checked on 2026-11-10. Only a starting point:
  * the settings field overrides it, and `/eapi/info/domains` extends it at runtime.
  */
-const KNOWN_MIRRORS = ['https://z-lib.gd', 'https://z-lib.gl', 'https://z-lib.by', 'https://z-library.website', 'https://zlib.bz', 'https://z-library.qa'];
+const KNOWN_MIRRORS = ['https://z-lib.by', 'https://z-library.website', 'https://z-lib.gd', 'https://z-lib.gl', 'https://zlib.bz', 'https://z-library.qa'];
 
 /**
  * The self-imposed ceiling on one search, against the 20 seconds the host allows an indexer. Failing
@@ -207,7 +207,13 @@ export default {
 
   async test(config, host) {
     try {
+      const formats = configuredFormats(config);
+      if (formats.length === 0) throw host.fail('unsupportedMedium', 'no ebook formats are configured for this indexer');
       const payload = await accountCall(config, host, PROFILE_PATH);
+      // Main domains answer the profile endpoint while gating `/eapi/book/search` behind a
+      // redirect wall, so a test that only checks the profile passes against a mirror that
+      // cannot search.
+      await apiCall(config, host, SEARCH_PATH, { method: 'POST', body: searchBody('dune', { limit: 1 }, formats) });
       const user = payload.user ?? {};
       const limit = toNumber(user.downloads_limit);
       const today = toNumber(user.downloads_today);
