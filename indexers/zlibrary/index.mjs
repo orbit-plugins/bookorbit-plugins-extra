@@ -21,6 +21,8 @@ const PROFILE_PATH = '/eapi/user/profile';
 const LOGIN_PATH = '/eapi/user/login';
 const DOMAINS_PATH = '/eapi/info/domains';
 const filePath = (id, hash) => `/eapi/book/${id}/${hash}/file`;
+/** A book's own page on the mirror, with the edition details and description an approver checks it by. */
+const bookPagePath = (id, hash) => `/book/${id}/${hash}`;
 
 /**
  * Mirrors that served the API to a plain client when checked on 2026-11-10. Only a starting point:
@@ -185,8 +187,9 @@ export default {
       if (releases.length >= query.limit || signal?.aborted) break;
       try {
         const payload = await apiCall(config, host, SEARCH_PATH, { method: 'POST', body: searchBody(pass.text, query, formats) }, signal, started);
+        const origin = workingOrigin.get(config.id) ?? baseOf(config);
         for (const book of payload.books ?? []) {
-          const release = toRelease(book, formats);
+          const release = toRelease(book, formats, origin);
           if (!release || seen.has(release.guid)) continue;
           seen.add(release.guid);
           releases.push(release);
@@ -264,6 +267,16 @@ export default {
   /** Called every six hours. There is no session to keep alive, but the domain list goes stale. */
   async keepalive(config, host) {
     await refreshDomains(config, host);
+  },
+
+  /**
+   * Called when an operator changes the credential, the address or the settings. Clears the cached
+   * login session, working mirror and discovered domain list for that indexer.
+   */
+  forget(indexerId) {
+    workingOrigin.delete(indexerId);
+    discovered.delete(indexerId);
+    logins.delete(indexerId);
   },
 };
 
@@ -389,7 +402,7 @@ function searchBody(text, query, formats) {
   return body.toString();
 }
 
-function toRelease(book, formats) {
+function toRelease(book, formats, origin) {
   if (!book || book.deleted === 1 || book.deleted === '1') return null;
   const id = toNumber(book.id);
   const hash = typeof book.hash === 'string' ? book.hash.trim() : '';
@@ -406,6 +419,8 @@ function toRelease(book, formats) {
     guid: `${id}-${hash}`,
     title,
     ...(bookTitle ? { bookTitle } : {}),
+    // A host older than the field ignores it.
+    ...(origin ? { infoUrl: `${origin}${bookPagePath(id, hash)}` } : {}),
     sizeBytes: toNumber(book.filesize),
     // Not zero. Nothing here publishes swarm counts, and a zero would be read as a dead torrent.
     seeders: null,

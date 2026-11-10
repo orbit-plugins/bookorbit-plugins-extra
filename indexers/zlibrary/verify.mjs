@@ -173,6 +173,7 @@ console.log('release rows');
   const host = makeHost(() => searchAnswer([BOOK, DUNE, PDF, { ...BOOK, id: 8, deleted: 1 }, { ...BOOK, id: 9, hash: '' }]));
   const [book, dune, ...rest] = await plugin.search(query(), cfg(), host);
   ok('identifies a release by book id and hash', book.guid === '129316134-a03568');
+  ok('links the book page on the mirror that answered', book.infoUrl === 'https://z-lib.gd/book/129316134/a03568', book.infoUrl);
   ok('keeps the full title', book.title === 'Awakened (The Last Daughter Book 2)');
   ok('scores against the title without its series', book.bookTitle === 'Awakened');
   ok('states no bare title when there is nothing to strip', dune.bookTitle === undefined);
@@ -404,6 +405,35 @@ const profileAnswer = () => json({ success: 1, user: { downloads_today: 1, downl
   );
   const file = await plugin.resolveFile({ guid: '129316134-a03568', title: 'Awakened', format: 'epub', sizeBytes: null, seeders: null, leechers: null }, passwordCfg(), host);
   ok('a grab logs in with the password too', file.url === 'https://dl.example/x' && host.reqs[1].init.headers.Cookie === 'remix_userid=777; remix_userkey=feedface0123');
+}
+
+console.log('forget()');
+{
+  const host = makeHost((url) => {
+    if (url.endsWith('/eapi/user/login')) return loginAnswer();
+    if (url.endsWith('/eapi/book/search')) return searchAnswer([BOOK]);
+    return profileAnswer();
+  });
+  const config = passwordCfg();
+  await plugin.test(config, host);
+  plugin.forget(config.id);
+  await plugin.test(config, host);
+  ok('drops the held login session when told to', host.calls.filter((u) => u.endsWith('/eapi/user/login')).length === 2, host.calls);
+}
+{
+  const host = makeHost((url) =>
+    url.startsWith('https://z-lib.gd/')
+      ? unreachable()
+      : url.endsWith('/eapi/info/domains')
+        ? json({ success: 1, domains: [{ domain: 'new-mirror.example', isRedirector: false, contentAvailable: true }] })
+        : searchAnswer([BOOK]),
+  );
+  const config = cfg({ settings: { mirrors: 'https://mine.example' } });
+  await plugin.keepalive(config, host);
+  plugin.forget(config.id);
+  const next = makeHost((url) => (url.startsWith('https://new-mirror.example/') ? searchAnswer([BOOK]) : unreachable()));
+  await plugin.search(query(), config, next).catch(() => {});
+  ok('drops the remembered mirror and discovered domains when told to', next.calls.join() === 'https://z-lib.gd/eapi/book/search,https://mine.example/eapi/book/search', next.calls);
 }
 
 console.log('resolveFile');
