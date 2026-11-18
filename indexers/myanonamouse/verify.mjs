@@ -104,7 +104,7 @@ ok('needs a session credential', plugin.requiresCredential === true && plugin.cr
 ok('carries ebooks and audiobooks', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook"]');
 ok('joins a swarm and uses categories', plugin.seedsBack === true && plugin.usesCategories === true);
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '2.1.2');
+ok('plugin version', plugin.version === '2.1.3');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/myanonamouse.json') && plugin.update.ed25519PublicKey.length === 43);
 ok('offers the seedbox toggle, off by default', plugin.settingsFields?.[0]?.key === 'dynamicSeedbox' && plugin.settingsFields[0].default === false);
 {
@@ -151,6 +151,12 @@ for (const format of ['epub', 'cbz', 'cbr', 'cb7', 'cbx', 'pdf cbz']) {
   await search(host, { title: 'Project Hail Mary (Unabridged)' });
   // A tracker that ANDs its terms answers a decorated title with nothing at all.
   ok('drops the edition qualifier from the search text', JSON.parse(host.reqs[0].init.body).tor.text === 'Project Hail Mary Andy Weir');
+}
+{
+  const host = makeHost(() => json({ data: [] }));
+  await search(host, { title: 'Is It Too Late to Make a Run for It?' });
+  // A sentence-ending mark in the title becomes an ANDed term nothing matches; drop it.
+  ok('strips sentence-ending marks from the search text', JSON.parse(host.reqs[0].init.body).tor.text === 'Is It Too Late to Make a Run for It Andy Weir');
 }
 {
   const config = cfg({ credential: null });
