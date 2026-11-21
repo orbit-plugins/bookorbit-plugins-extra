@@ -132,7 +132,7 @@ const seedboxTouchedAt = new Map();
 
 export default {
   apiVersion: 1,
-  version: '2.1.2',
+  version: '2.1.3',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/myanonamouse.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -253,10 +253,21 @@ async function runSearch(query, config, host, broaden) {
   return (payload.data ?? []).map((row) => toRelease(row, config)).filter(Boolean);
 }
 
+/**
+ * The tracker ANDs the terms of a text search, so a sentence-ending mark in a requested title
+ * becomes a term nothing matches: `Is It Too Late to Make a Run for It?` returns nothing while
+ * the same title without the `?` finds it. Drop the marks and close the gap they leave. This runs
+ * on the host's combined title-and-author text, where the mark sits between the two, not at the end.
+ */
+function sanitizeSearchText(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(/[?!]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 function searchBody(query, config, host, broaden) {
   const body = {
     tor: {
-      text: host.buildSearchText(query),
+      text: sanitizeSearchText(host.buildSearchText(query)),
       srchIn: broaden ? { title: 'true', author: 'true', series: 'true', description: 'true' } : { title: 'true', author: 'true' },
       /**
        * The tracker's own version of the zero-seeder hard filter BookOrbit applies afterwards.
