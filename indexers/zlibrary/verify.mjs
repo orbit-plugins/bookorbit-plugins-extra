@@ -95,13 +95,13 @@ const searchAnswer = (books) => json({ success: 1, books, exactBooksCount: books
 
 console.log('declaration');
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '1.0.0');
+ok('plugin version', plugin.version === '1.0.1');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/zlibrary.json') && plugin.update.ed25519PublicKey.length === 43);
 ok('needs a session credential', plugin.requiresCredential === true && plugin.credentialKind === 'sessionId');
 ok('carries ebooks only', JSON.stringify(plugin.mediaKinds) === '["ebook"]');
 ok('serves the file itself', typeof plugin.resolveFile === 'function' && plugin.fetchTorrentFile === undefined);
 ok('seeds nothing and uses no categories', plugin.seedsBack === false && plugin.usesCategories === false);
-ok('defaults to a mirror, not a walled main domain', plugin.defaultBaseUrl === 'https://z-lib.by');
+ok('requires the operator to choose the credential origin', plugin.defaultBaseUrl === undefined);
 ok('offers formats, an e-mail and mirrors', plugin.settingsFields.map((f) => f.key).join() === 'ebookFormats,email,mirrors');
 
 console.log('search requests');
@@ -260,6 +260,48 @@ console.log('mirror failover');
   ok('reports rate limiting as throttled', threw?.failure === 'throttled' && host.reqs.length === 1);
 }
 
+for (const error of [
+  Object.assign(new Error('Unable to resolve URL host'), { name: 'RemoteHostResolutionException' }),
+  new DOMException('Timed out', 'TimeoutError'),
+  new TypeError('fetch failed', { cause: Object.assign(new Error(), { code: 'ECONNREFUSED' }) }),
+]) {
+  const config = cfg({ settings: { mirrors: 'fallback.example' } });
+  const host = makeHost((url) => {
+    if (url.startsWith(config.baseUrl)) throw error;
+    return searchAnswer([BOOK]);
+  });
+  const rows = await plugin.search(query(), config, host).catch(() => []);
+  ok(`anonymous search retries a transport failure (${error.name})`, rows.length === 1 && host.calls.length === 2);
+}
+{
+  const denied = Object.assign(new Error('Address policy refusal'), { name: 'PrivateAddressException' });
+  const host = makeHost(() => { throw denied; });
+  const error = await plugin.search(query(), cfg(), host).catch((failure) => failure);
+  ok('preserves an address policy refusal', error === denied && host.calls.length === 1);
+}
+
+for (const email of ['', 'account@example.com']) {
+  const config = cfg({ settings: { email, mirrors: 'fallback.example' } });
+  const host = makeHost((url) => url.startsWith(config.baseUrl) ? wall() : searchAnswer([BOOK]));
+  await plugin.search(query(), config, host);
+  host.reqs.length = 0;
+  const result = await plugin.test(config, host);
+  ok(`only the base URL receives the ${email ? 'password' : 'session'} after anonymous failover`,
+    !result.success && host.calls.length === 1 && host.calls[0].startsWith(config.baseUrl + '/'));
+}
+{
+  const host = makeHost(() => wall());
+  const result = await plugin.test(cfg({ baseUrl: '' }), host);
+  ok('requires a secure base URL before sending a credential', !result.success && host.calls.length === 0);
+}
+for (const reason of ['Invalid credentials', 'Daily limit', 'Unexpected response']) {
+  const marker = 'fixture-detail';
+  const host = makeHost(() => json({ success: 0, error: reason + ' ' + marker }));
+  const result = await plugin.test(cfg(), host);
+  ok(`omits remote text from ${reason} failures`,
+    !result.success && !result.error.includes(marker) && host.logs.every((line) => !line.includes(marker)));
+}
+
 console.log('domain discovery');
 {
   const host = makeHost((url) => {
@@ -333,7 +375,7 @@ console.log('session');
 {
   const host = makeHost(() => json({ success: 0, error: 'Invalid credentials' }, { status: 400 }));
   const result = await plugin.test(cfg(), host);
-  ok('reads invalid credentials as a rejected session', /rejected the session \(Invalid credentials\)/.test(result.error ?? ''), result);
+  ok('reads invalid credentials as a rejected session', /rejected the session/.test(result.error ?? ''), result);
 }
 {
   const host = makeHost(() => json({ success: 1 }));
@@ -384,7 +426,7 @@ const profileAnswer = () => json({ success: 1, user: { downloads_today: 1, downl
   const config = passwordCfg();
   const first = await plugin.test(config, host);
   const second = await plugin.test(config, host);
-  ok('reports a refused password', /refused the login \(Incorrect email or password\)\. Check the e-mail and password/.test(first.error ?? ''), first);
+  ok('reports a refused password', /refused the login\. Check the e-mail and password/.test(first.error ?? ''), first);
   ok('does not retry a refused password straight away', host.reqs.length === 1 && /Not retried until/.test(second.error ?? ''), second);
   await plugin.test({ ...config, credential: 'fixed' }, host);
   ok('tries again at once with a different password', host.reqs.length === 2);
@@ -485,6 +527,32 @@ const release = { guid: '129316134-a03568', title: 'Awakened (The Last Daughter 
     threw = error;
   }
   ok('refuses a release without a book id', /no Z-Library book id/.test(threw?.message ?? '') && host.reqs.length === 0);
+}
+
+{
+  const config = cfg({ settings: { mirrors: 'fallback.example' } });
+  let simultaneous = false;
+  const file = Promise.withResolvers();
+  const search = Promise.withResolvers();
+  const waiting = Promise.withResolvers();
+  let readers = 0;
+  const host = makeHost((url) => {
+    if (!simultaneous) return url.startsWith(config.baseUrl) ? wall() : searchAnswer([BOOK]);
+    const pending = url.endsWith('/file') ? file : search;
+    return { status: 200, text: () => {
+      if (++readers === 2) waiting.resolve();
+      return pending.promise;
+    } };
+  });
+  await plugin.search(query(), config, host);
+  simultaneous = true;
+  const download = plugin.resolveFile(release, config, host);
+  const rows = plugin.search(query(), config, host);
+  await waiting.promise;
+  file.resolve(JSON.stringify({ success: 1, file: { downloadLink: '/dl/book' } }));
+  search.resolve(JSON.stringify({ success: 1, books: [BOOK] }));
+  ok('concurrent search and file responses retain their own origins',
+    (await download).url === config.baseUrl + '/dl/book' && (await rows)[0].infoUrl.startsWith('https://fallback.example/'));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

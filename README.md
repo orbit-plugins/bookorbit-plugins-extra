@@ -56,10 +56,11 @@ client. The session is ASN locked and rotates per request, so the plugin saves t
 back through the host. The dynamic seedbox toggle registers the address BookOrbit connects from,
 which is only correct when your download client shares it.
 
-**zlibrary** talks to `/eapi`, failing over across configured mirrors and domains learned from
-`/eapi/info/domains`. Searching is anonymous; resolving a file spends one of the account's daily
-downloads, authenticated with either `remix_userid`/`remix_userkey` cookies or an e-mail and
-password logged in once and held in memory. Discovered domains are only ever searched anonymously.
+**zlibrary** searches the ebook API anonymously. Enter the trusted HTTPS base URL for the account.
+Only that origin receives the password, session cookies, profile requests and file lookups. Fallback
+mirrors and domains learned from `/eapi/info/domains` are used for anonymous requests. Resolving a
+file spends one daily download. The plugin accepts either a session cookie pair or an email address
+and password.
 
 ## Verifying
 

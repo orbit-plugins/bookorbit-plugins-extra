@@ -1,3 +1,27 @@
+/*
+ * MIT License
+ *
+ * Copyright (c) 2026 secunit404
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
 /**
  * Z-Library as a BookOrbit indexer plugin.
  *
@@ -12,8 +36,8 @@
  *
  * The site moves between domains. The main domains answer scripts with a cookie wall, which this
  * does not try to get past: it uses the mirrors that serve the API openly, fails over between them,
- * and learns new ones from the site's own domain list. See `candidateOrigins`. A listed domain is
- * only ever searched anonymously: the account goes nowhere the operator did not configure.
+ * and learns new ones from the site's own domain list. Only the operator's HTTPS base URL
+ * receives account requests.
  */
 
 const SEARCH_PATH = '/eapi/book/search';
@@ -123,7 +147,7 @@ const logins = new Map();
 
 export default {
   apiVersion: 1,
-  version: '1.0.0',
+  version: '1.0.1',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/zlibrary.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -136,8 +160,7 @@ export default {
   supportsIsbnSearch: true,
   usesCategories: false,
   seedsBack: false,
-  defaultBaseUrl: KNOWN_MIRRORS[0],
-  baseUrlHint: 'The mirror to try first. Others from the mirror list are tried when it stops answering.',
+  baseUrlHint: 'Enter the HTTPS address trusted with the account. Login, profile and download requests go only to this origin.',
   settingsFields: [
     {
       key: 'ebookFormats',
@@ -159,7 +182,7 @@ export default {
       key: 'mirrors',
       type: 'string',
       label: 'Fallback mirrors',
-      hint: 'Tried in order after the base URL. Domains the site itself lists are added after these.',
+      hint: 'Used for anonymous requests only. Domains the site lists are tried after these.',
       default: KNOWN_MIRRORS.join(','),
       format: 'list',
     },
@@ -186,8 +209,7 @@ export default {
     for (const pass of passes) {
       if (releases.length >= query.limit || signal?.aborted) break;
       try {
-        const payload = await apiCall(config, host, SEARCH_PATH, { method: 'POST', body: searchBody(pass.text, query, formats) }, signal, started);
-        const origin = workingOrigin.get(config.id) ?? baseOf(config);
+        const { payload, origin } = await apiCall(config, host, SEARCH_PATH, { method: 'POST', body: searchBody(pass.text, query, formats) }, signal, started);
         for (const book of payload.books ?? []) {
           const release = toRelease(book, formats, origin);
           if (!release || seen.has(release.guid)) continue;
@@ -212,7 +234,7 @@ export default {
     try {
       const formats = configuredFormats(config);
       if (formats.length === 0) throw host.fail('unsupportedMedium', 'no ebook formats are configured for this indexer');
-      const payload = await accountCall(config, host, PROFILE_PATH);
+      const { payload } = await accountCall(config, host, PROFILE_PATH);
       // Main domains answer the profile endpoint while gating `/eapi/book/search` behind a
       // redirect wall, so a test that only checks the profile passes against a mirror that
       // cannot search.
@@ -238,7 +260,7 @@ export default {
     const book = bookOf(release);
     if (!book) throw host.fail('error', 'that release carries no Z-Library book id, so there is nothing to look up');
 
-    const payload = await accountCall(config, host, filePath(book.id, book.hash), signal);
+    const { payload, origin } = await accountCall(config, host, filePath(book.id, book.hash), signal);
     const file = payload.file ?? {};
     if (typeof file.downloadLink !== 'string' || !file.downloadLink) {
       throw host.fail('error', `the site gave no download link${file.allowDownload === false ? ': downloading this book is not allowed' : ''}`);
@@ -249,7 +271,7 @@ export default {
 
     let url;
     try {
-      url = new URL(file.downloadLink, workingOrigin.get(config.id) ?? baseOf(config));
+      url = new URL(file.downloadLink, origin);
     } catch {
       throw host.fail('error', 'the site gave a download link that is not a URL');
     }
@@ -280,21 +302,21 @@ export default {
   },
 };
 
-/**
- * Every origin worth trying, best first: the one that last answered, the configured base URL, the
- * configured mirrors, then whatever the site's own domain list added.
- *
- * A call that carries the account never reaches a listed domain. The list arrives from a mirror,
- * and a mirror that lied about it would otherwise be handed the password or the session.
- */
-function candidateOrigins(config, withAccount) {
-  const configured = uniqueOrigins([
-    baseOf(config),
+function searchOrigins(config) {
+  return uniqueOrigins([
+    workingOrigin.get(config.id),
+    config.baseUrl,
     ...splitList(typeof config.settings?.mirrors === 'string' ? config.settings.mirrors : KNOWN_MIRRORS.join(',')),
+    ...(discovered.get(config.id) ?? []),
   ]);
-  const working = workingOrigin.get(config.id);
-  if (withAccount) return uniqueOrigins([configured.includes(working) ? working : null, ...configured]);
-  return uniqueOrigins([working, ...configured, ...(discovered.get(config.id) ?? [])]);
+}
+
+function accountOrigin(config, host) {
+  const url = URL.parse(config.baseUrl);
+  if (url?.protocol !== 'https:' || url.username || url.password) {
+    throw host.fail('error', 'set a trusted HTTPS base URL for account requests');
+  }
+  return url.origin;
 }
 
 function uniqueOrigins(values) {
@@ -316,11 +338,13 @@ function uniqueOrigins(values) {
  */
 async function apiCall(config, host, path, { method, body, session, withAccount = Boolean(session) }, signal, started = Date.now()) {
   const skipped = [];
-  for (const origin of candidateOrigins(config, withAccount)) {
+  const origins = withAccount ? [accountOrigin(config, host)] : searchOrigins(config);
+  for (const origin of origins) {
     if (signal?.aborted) break;
     if (skipped.length > 0 && Date.now() - started > SEARCH_BUDGET_MS) break;
 
     let response;
+    let text;
     try {
       response = await host.fetch(`${origin}${path}`, {
         method,
@@ -335,31 +359,44 @@ async function apiCall(config, host, path, { method, body, session, withAccount 
         },
         ...(body !== undefined ? { body } : {}),
       });
+      if (response.status === 429) throw host.fail('throttled', 'the site is rate limiting requests');
+      text = await response.text();
     } catch (error) {
-      const failure = error?.failure ?? error?.code;
+      const failure = transportFailure(error);
       if (failure !== 'unreachable' && failure !== 'timeout') throw error;
       skipped.push(`${hostOf(origin)} ${failure}`);
       continue;
     }
 
-    if (response.status === 429) throw host.fail('throttled', 'the site is rate limiting us');
-
-    const text = await response.text();
-    const payload = parseJson(text);
+    const payload = response.status >= 300 && response.status < 400 ? null : parseJson(text);
     if (!payload) {
       skipped.push(`${hostOf(origin)} answered ${response.status} without the API`);
       continue;
     }
 
-    rememberOrigin(config, host, origin);
-    if (payload.success) return payload;
+    if (payload.success) {
+      if (!withAccount) rememberOrigin(config, host, origin);
+      return { payload, origin };
+    }
     throw refusal(host, response.status, payload);
   }
 
+  if (signal?.aborted) throw host.fail('timeout', 'the request was cancelled or timed out');
+  if (withAccount) throw host.fail('unreachable', 'the configured base URL did not answer the account request');
   throw host.fail(
     'unreachable',
     `no Z-Library mirror answered (${skipped.join('; ') || 'none tried'}). Add a working mirror under Fallback mirrors.`,
   );
+}
+
+function transportFailure(error) {
+  if (error?.failure) return error.failure;
+  if (error?.name === 'RemoteHostResolutionException') return 'unreachable';
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return 'timeout';
+  const code = error?.cause?.code ?? error?.code;
+  if (['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].includes(code)) return 'timeout';
+  if (['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_SOCKET'].includes(code)) return 'unreachable';
+  return code;
 }
 
 function rememberOrigin(config, host, origin) {
@@ -373,7 +410,7 @@ function rememberOrigin(config, host, origin) {
  * failover rejects in a single fast round trip; the rest are new mirrors nobody had to add by hand.
  */
 async function refreshDomains(config, host) {
-  const payload = await apiCall(config, host, DOMAINS_PATH, { method: 'GET' });
+  const { payload } = await apiCall(config, host, DOMAINS_PATH, { method: 'GET' });
   const origins = (payload.domains ?? [])
     .filter((entry) => entry && typeof entry.domain === 'string' && entry.isRedirector !== true && entry.contentAvailable !== false)
     .map((entry) => originOf(entry.domain))
@@ -385,11 +422,11 @@ async function refreshDomains(config, host) {
 /** The API says why in `error`, with a 200 or a 400 status that carries no meaning of its own. */
 function refusal(host, status, payload) {
   const message = typeof payload.error === 'string' && payload.error.trim() ? payload.error.trim().slice(0, MAX_REFUSAL_CHARS) : `the site answered ${status}`;
-  if (/log ?in|auth|credential|password|session|user ?key/i.test(message)) {
-    return host.fail('unauthorized', `the site rejected the session (${message})`);
+  if (status === 401 || status === 403 || /log ?in|auth|credential|password|session|user ?key/i.test(message)) {
+    return host.fail('unauthorized', 'the site rejected the session');
   }
-  if (/limit|too many|quota/i.test(message)) return host.fail('throttled', message);
-  return host.fail('error', message);
+  if (/limit|too many|quota/i.test(message)) return host.fail('throttled', 'the site reported a request or download limit');
+  return host.fail('error', `the site refused the request (HTTP ${status})`);
 }
 
 function searchBody(text, query, formats) {
@@ -470,8 +507,9 @@ async function accountCall(config, host, path, signal) {
     }
   }
 
+  const origin = accountOrigin(config, host);
   const cached = logins.get(config.id);
-  const fresh = cached?.email === email && cached.password === config.credential && cached.session;
+  const fresh = cached?.origin === origin && cached.email === email && cached.password === config.credential && cached.session;
   const session = fresh ? cached.session : await login(config, host, email, signal);
   try {
     return await apiCall(config, host, path, { method: 'GET', session }, signal);
@@ -486,19 +524,20 @@ async function login(config, host, email, signal) {
   const password = config.credential ?? '';
   if (!password) throw host.fail('unauthorized', 'no password is configured. Enter the Z-Library password in the Session ID field.');
 
+  const origin = accountOrigin(config, host);
   const previous = logins.get(config.id);
-  if (previous?.email === email && previous.password === password && Date.now() < previous.refusedUntil) {
+  if (previous?.origin === origin && previous.email === email && previous.password === password && Date.now() < previous.refusedUntil) {
     throw host.fail('unauthorized', `${previous.refusal} Not retried until ${new Date(previous.refusedUntil).toISOString()}.`);
   }
 
   const body = new URLSearchParams({ email, password }).toString();
   let payload;
   try {
-    payload = await apiCall(config, host, LOGIN_PATH, { method: 'POST', body, withAccount: true }, signal);
+    ({ payload } = await apiCall(config, host, LOGIN_PATH, { method: 'POST', body, withAccount: true }, signal));
   } catch (error) {
     if (error?.failure !== 'unauthorized') throw error;
-    const refusal = `the site refused the login (${error.message.replace(/^.*?\((.*)\)$/, '$1')}). Check the e-mail and password.`;
-    logins.set(config.id, { email, password, session: null, refusedUntil: Date.now() + LOGIN_COOLDOWN_MS, refusal });
+    const refusal = 'the site refused the login. Check the e-mail and password.';
+    logins.set(config.id, { origin, email, password, session: null, refusedUntil: Date.now() + LOGIN_COOLDOWN_MS, refusal });
     throw host.fail('unauthorized', refusal);
   }
 
@@ -508,7 +547,7 @@ async function login(config, host, email, signal) {
     throw host.fail('error', 'the site accepted the login but returned no session');
   }
   const session = `remix_userid=${id}; remix_userkey=${key}`;
-  logins.set(config.id, { email, password, session, refusedUntil: 0, refusal: '' });
+  logins.set(config.id, { origin, email, password, session, refusedUntil: 0, refusal: '' });
   host.logger.log(`[zlibrary.login] [end] indexerId=${config.id} - logged in`);
   return session;
 }
@@ -564,10 +603,6 @@ function splitList(value) {
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
-}
-
-function baseOf(config) {
-  return (config.baseUrl ?? '').replace(/\/+$/, '');
 }
 
 /** An origin from a full URL or a bare domain, and only over HTTPS. */
