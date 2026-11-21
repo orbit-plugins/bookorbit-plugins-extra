@@ -54,7 +54,8 @@ because other-language rows crowd out common titles on page one.
 **myanonamouse** fetches a `.torrent` with the account's own session and hands it to a torrent
 client. The session is ASN locked and rotates per request, so the plugin saves the rotated value
 back through the host. The dynamic seedbox toggle registers the address BookOrbit connects from,
-which is only correct when your download client shares it.
+which is only correct when your download client shares it. Enable **Use freeleech wedges** to
+request a wedge when grabbing a torrent that is neither freeleech nor VIP. This is off by default.
 
 **zlibrary** searches the ebook API anonymously. Enter the trusted HTTPS base URL for the account.
 Only that origin receives the password, session cookies, profile requests and file lookups. Fallback

@@ -132,7 +132,7 @@ const seedboxTouchedAt = new Map();
 
 export default {
   apiVersion: 1,
-  version: '2.1.3',
+  version: '2.2.0',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/myanonamouse.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -154,6 +154,13 @@ export default {
       type: 'boolean',
       label: 'Register this server as the seedbox',
       hint: 'The tracker refuses announces from an address your account has not registered. Turn this on to register the address BookOrbit connects from, which is only correct when your download client shares that address. The session must have been created with dynamic seedbox permission.',
+      default: false,
+    },
+    {
+      key: 'useFreeleechWedges',
+      type: 'boolean',
+      label: 'Use freeleech wedges',
+      hint: 'Request a wedge when grabbing a torrent that is neither freeleech nor VIP. Each successful use spends one wedge from the account.',
       default: false,
     },
   ],
@@ -196,7 +203,13 @@ export default {
     // client being handed the file, and the registration has to already be in place by then.
     await authorizeSeedbox(config, host);
 
-    const response = await fetchWithSession(config, host, release.downloadUrl, { method: 'GET' });
+    let downloadUrl = release.downloadUrl;
+    if (config.settings?.useFreeleechWedges === true && release.freeleech === false && release.vipOnly === false) {
+      const url = new URL(downloadUrl);
+      url.searchParams.set('fl', '1');
+      downloadUrl = url.href;
+    }
+    const response = await fetchWithSession(config, host, downloadUrl, { method: 'GET' });
     const body = new Uint8Array(await response.arrayBuffer());
 
     if (body.byteLength === 0) throw host.fail('error', 'The tracker returned an empty .torrent file');
@@ -501,7 +514,7 @@ function toRelease(row, config) {
     // Which is also what makes the pair readable the other way round. `fl_vip` without `free` can
     // only be the VIP half, and the tracker refuses that download with "you are not VIP or higher"
     // rather than letting it through, so the picker says so before the approver spends a grab.
-    vipOnly: isTruthyFlag(row.fl_vip) && !isTruthyFlag(row.free),
+    vipOnly: isTruthyFlag(row.vip) || (isTruthyFlag(row.fl_vip) && !isTruthyFlag(row.free)),
     ...(publishedAt ? { publishedAt } : {}),
     ...(audio ? { audio } : {}),
     ...(fileCount !== null ? { fileCount } : {}),

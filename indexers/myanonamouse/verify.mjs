@@ -104,7 +104,8 @@ ok('needs a session credential', plugin.requiresCredential === true && plugin.cr
 ok('carries ebooks and audiobooks', JSON.stringify(plugin.mediaKinds) === '["ebook","audiobook"]');
 ok('joins a swarm and uses categories', plugin.seedsBack === true && plugin.usesCategories === true);
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '2.1.3');
+ok('plugin version', plugin.version === '2.2.0');
+ok('offers an opt-in wedge setting', plugin.settingsFields.some((field) => field.key === 'useFreeleechWedges' && field.type === 'boolean' && field.default === false));
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/myanonamouse.json') && plugin.update.ed25519PublicKey.length === 43);
 ok('offers the seedbox toggle, off by default', plugin.settingsFields?.[0]?.key === 'dynamicSeedbox' && plugin.settingsFields[0].default === false);
 {
@@ -349,6 +350,8 @@ for (const [name, patch, free, vip] of [
   ['a plain torrent is neither', {}, false, false],
   ['free=1 is freeleech', { free: '1' }, true, false],
   ['personal freeleech counts', { personal_freeleech: '1' }, true, false],
+  ['explicit VIP flag counts independently', { vip: '1' }, false, true],
+  ['explicit VIP flag also counts on a free torrent', { vip: '1', free: '1' }, true, true],
   ['fl_vip without free is VIP only', { fl_vip: '1' }, false, true],
   ['fl_vip with free is the freeleech half', { fl_vip: '1', free: '1' }, true, false],
 ]) {
@@ -510,6 +513,23 @@ console.log('forget()');
 }
 
 console.log('fetchTorrentFile()');
+{
+  const plainUrl = 'https://mam.proxy.example/mam/tor/download.php?tid=481516';
+  for (const [name, setting, flags, wedge] of [
+    ['enabled for an ordinary release', true, { freeleech: false, vipOnly: false }, true],
+    ['unset', undefined, { freeleech: false, vipOnly: false }, false],
+    ['disabled', false, { freeleech: false, vipOnly: false }, false],
+    ['already freeleech', true, { freeleech: true, vipOnly: false }, false],
+    ['VIP', true, { freeleech: false, vipOnly: true }, false],
+    ['missing VIP status', true, { freeleech: false }, false],
+    ['missing freeleech status', true, { vipOnly: false }, false],
+  ]) {
+    const host = makeHost(() => bencode());
+    const release = { downloadUrl: plainUrl, ...flags };
+    await plugin.fetchTorrentFile(release, cfg({ settings: { useFreeleechWedges: setting } }), host);
+    ok(`wedge request: ${name}`, host.calls.length === 1 && host.calls[0] === (wedge ? plainUrl + '&fl=1' : plainUrl) && release.downloadUrl === plainUrl);
+  }
+}
 {
   const host = makeHost(() => bencode());
   const out = await plugin.fetchTorrentFile({ guid: '1', title: 't', downloadUrl: 'https://www.myanonamouse.net/tor/download.php?tid=1' }, cfg(), host);
