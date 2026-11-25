@@ -12,12 +12,27 @@
  * `fetchTorrentFile`, reports no swarm counts at all, and needs an HTTP download client rather
  * than a torrent one.
  *
- * A search row carries the file md5. The catalogue's legacy ads and get endpoints are not reliable
- * download resolvers anymore, so grabs use the download service's md5 endpoint directly.
+ * A grab is two steps: the search row carries an md5, and the mirror's `/ads.php?md5=` answers with a
+ * short-lived keyed `get.php` link that redirects to whichever host holds the file. The configured
+ * mirror is asked first, then the download mirrors setting, in order.
+ *
+ * Not `libgen.download/api/download`: measured 2026-11-25 it is only a redirector that answers 302 to
+ * `libgen.vg/ads.php`, so it lands on the same ads page through a host nobody configured, with no
+ * referer, and hands BookOrbit's downloader that HTML page instead of a file.
  */
 
 const SEARCH_PATH = '/index.php';
-const DOWNLOAD_ORIGIN = 'https://libgen.download';
+const ADS_PATH = '/ads.php';
+/** One intermediate page, which exists only to carry a single link out of it. */
+const MAX_PAGE_BYTES = 1024 * 1024;
+/** Tried after the configured mirror. All of them answered `/ads.php` on 2026-11-25. */
+const DEFAULT_DOWNLOAD_MIRRORS = 'https://libgen.li,https://libgen.gl,https://libgen.bz,https://libgen.la,https://libgen.vg';
+/**
+ * Every mirror shares one catalogue database, and when it is out of connections a mirror answers its
+ * pages with this sentence (HTTP 200 on `/ads.php`, 500 on `get.php`) instead of the page. That is
+ * load, not a dead mirror, and it is worth saying so instead of "no link on the page".
+ */
+const DATABASE_BUSY = /max_user_connections|could not connect to the database/i;
 
 /** A full result page of markup, with room to spare. Nothing is buffered past this. */
 const MAX_SEARCH_BYTES = 4 * 1024 * 1024;
@@ -189,7 +204,7 @@ const ISO_639_2_TO_1 = {
 
 export default {
   apiVersion: 1,
-  version: '2.1.0',
+  version: '2.2.0',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/libgen.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -222,6 +237,14 @@ export default {
       format: 'list',
       options: ALLOWED_FORMATS.ebook,
       minItems: 1,
+    },
+    {
+      key: 'downloadMirrors',
+      type: 'string',
+      label: 'Download mirrors',
+      hint: 'Asked for a download link, in order, when the base URL cannot give one. Mirrors share one catalogue, so any of them can serve the file.',
+      default: DEFAULT_DOWNLOAD_MIRRORS,
+      format: 'list',
     },
   ],
 
@@ -295,19 +318,88 @@ export default {
     }
   },
 
-  /** Resolved only after an approver picks a release. */
+  /**
+   * Resolved for the one release an approver picked rather than during the search, because it costs
+   * a request per mirror tried and the key it comes back with is short lived.
+   */
   async resolveFile(release, config, host) {
     const md5 = md5Of(release);
     if (!md5) throw host.fail('error', 'that release carries no md5, so there is nothing to look up');
+    if (!(release.format ?? '').trim()) {
+      throw host.fail('error', `"${release.title}" states no format, so there is no way to name the file it would be saved as`);
+    }
 
-    const url = new URL('/api/download', DOWNLOAD_ORIGIN);
-    url.searchParams.set('id', md5);
-    host.logger.log(
-      `[libgen.resolve] [end] indexerId=${config.id} md5=${md5} - download link resolved`,
-    );
-    return toFile(url.href, release, host);
+    const tried = [];
+    let busy = false;
+    for (const mirror of downloadMirrors(config)) {
+      const adsUrl = new URL(`${mirror}${ADS_PATH}`);
+      adsUrl.searchParams.set('md5', md5);
+      let html;
+      try {
+        html = await readPage(host, adsUrl.href, MAX_PAGE_BYTES, config, { Referer: `${mirror}/` });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (DATABASE_BUSY.test(message)) busy = true;
+        tried.push(`${hostOf(mirror)}: ${message}`);
+        host.logger.warn(`[libgen.resolve] [fail] indexerId=${config.id} md5=${md5} host=${hostOf(mirror)} error="${message}" - trying the next mirror`);
+        continue;
+      }
+
+      const href = firstGetLink(html);
+      if (href) {
+        host.logger.log(`[libgen.resolve] [end] indexerId=${config.id} md5=${md5} host=${hostOf(mirror)} - download link resolved`);
+        return toFile(new URL(href, adsUrl).href, release, host);
+      }
+      const reason = DATABASE_BUSY.test(html) ? 'its database is out of connections' : 'no download link on the page';
+      if (DATABASE_BUSY.test(html)) busy = true;
+      tried.push(`${hostOf(mirror)}: ${reason}`);
+      host.logger.warn(`[libgen.resolve] [fail] indexerId=${config.id} md5=${md5} host=${hostOf(mirror)} reason="${reason}" - trying the next mirror`);
+    }
+
+    if (busy) {
+      throw host.fail('unreachable', `Library Genesis is overloaded right now (its database refused the connection), try again in a few minutes. Tried ${tried.join('; ')}`);
+    }
+    throw host.fail('unreachable', `no mirror gave a download link for this file. Tried ${tried.join('; ')}`);
   },
 };
+
+/** The configured mirror first, then the download mirrors setting, each once. */
+function downloadMirrors(config) {
+  const extra = typeof config.settings?.downloadMirrors === 'string' ? config.settings.downloadMirrors : DEFAULT_DOWNLOAD_MIRRORS;
+  const mirrors = [baseOf(config), ...splitList(extra).map((entry) => entry.replace(/\/+$/, ''))];
+  const seen = new Set();
+  return mirrors.filter((mirror) => {
+    let key;
+    try {
+      const url = new URL(mirror);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+      key = url.origin.toLowerCase();
+    } catch {
+      return false;
+    }
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * The intermediate page writes the link several ways depending on which of its templates answered,
+ * so the narrowest pattern is tried first and the loosest last.
+ */
+const GET_LINK_PATTERNS = [
+  /<a\s+href=["']([^"']*get\.php\?md5=[^"']+&(?:amp;)?key=[^"']+)["'][^>]*>\s*<h2[^>]*>\s*GET\s*<\/h2>/i,
+  /<a[^>]+href=["']([^"']*get\.php\?md5=[^"']+&(?:amp;)?key=[^"']+)["']/i,
+  /href=["']([^"']*get\.php\?[^"']*md5=[^"']*&(?:amp;)?[^"']*key=[^"']+)["']/i,
+];
+
+function firstGetLink(html) {
+  for (const pattern of GET_LINK_PATTERNS) {
+    const match = pattern.exec(html);
+    if (match?.[1]) return decodeEntities(match[1]);
+  }
+  return null;
+}
 
 /**
  * The name the file lands under. Built from the release because the download URL identifies the
@@ -540,10 +632,10 @@ function md5Of(release) {
 }
 
 /** A fetch and a bounded read, with the failures a public mirror actually has. */
-async function readPage(host, url, limit, config) {
+async function readPage(host, url, limit, config, extraHeaders = {}) {
   const response = await host.fetch(url, {
     method: 'GET',
-    headers: { 'User-Agent': USER_AGENT, Accept: HTML_ACCEPT, 'Accept-Language': ACCEPT_LANGUAGE },
+    headers: { 'User-Agent': USER_AGENT, Accept: HTML_ACCEPT, 'Accept-Language': ACCEPT_LANGUAGE, ...extraHeaders },
   });
 
   if (response.status === 429) throw host.fail('throttled', 'the mirror is rate limiting us');

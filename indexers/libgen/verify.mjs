@@ -93,7 +93,7 @@ const query = {
 
 console.log('descriptor');
 ok('type slug', plugin.type === 'libgen');
-ok('plugin version', plugin.version === '2.1.0');
+ok('plugin version', plugin.version === '2.2.0');
 ok('signed update channel', /^https:\/\//.test(plugin.update?.manifestUrl ?? '') && /^[A-Za-z0-9_-]{43}$/.test(plugin.update?.ed25519PublicKey ?? ''));
 ok('no credential of any kind', plugin.requiresCredential === false && plugin.credentialKind === null);
 ok('resolveFile only', typeof plugin.resolveFile === 'function' && plugin.fetchTorrentFile === undefined);
@@ -376,15 +376,50 @@ console.log('paging past a crowded page');
 
 console.log('resolveFile');
 const release = { guid: 'e7c75dc2964ce80c19cb69140aae8614', title: 'Dune: A Novel', format: 'epub', sizeBytes: 702000 };
+// Captured from libgen.li for that md5: exactly one keyed get.php link.
+const ADS = fixture('ads.html');
+// What every mirror answered on 2026-11-25 while the shared catalogue database was out of connections.
+const BUSY = '<div class="alert alert-danger" role="alert">Could not connect to the database 3306. User \'libgen_get\' has exceeded the \'max_user_connections\' resource (current value: 80)<br><a href="">Report an error.</a></div>';
 {
-  const host = makeHost(() => {
-    throw new Error('resolveFile must not fetch the unreliable legacy endpoint');
-  });
+  const host = makeHost(() => res(ADS));
   const file = await plugin.resolveFile(release, cfg(), host);
-  ok('uses the current md5 download endpoint', file.url === `https://libgen.download/api/download?id=${release.guid}`, file.url);
-  ok('does not call the broken legacy resolver', host.calls.length === 0, host.calls);
+  ok('resolves through the configured mirror', host.calls.length === 1 && host.calls[0] === `https://libgen.li/ads.php?md5=${release.guid}`, host.calls);
+  ok('sends a same-origin referer, without which ads.php answers empty', host.reqs[0].init.headers.Referer === 'https://libgen.li/', host.reqs[0].init.headers);
+  ok('returns the keyed get.php link', file.url === `https://libgen.li/get.php?md5=${release.guid}&key=NLCM2M037MNFS4LN`, file.url);
+  ok('never the libgen.download redirector', !host.calls.some((url) => url.includes('libgen.download')) && !file.url.includes('libgen.download'));
   ok('filename from the release', file.fileName === 'Dune A Novel.epub', file.fileName);
   ok('format and size carried', file.format === 'epub' && file.sizeBytes === 702000);
+}
+{
+  const host = makeHost(() => res(ADS));
+  const file = await plugin.resolveFile(release, cfg({ baseUrl: 'https://libgen.gl' }), host);
+  ok('another configured mirror is the one asked', host.calls[0].startsWith('https://libgen.gl/ads.php') && file.url.startsWith('https://libgen.gl/get.php'), host.calls);
+}
+{
+  const host = makeHost((url) => (url.startsWith('https://libgen.li/') ? res(BUSY) : res(ADS)));
+  const file = await plugin.resolveFile(release, cfg(), host);
+  ok('a mirror with its database out of connections falls through to the next', host.calls.length === 2 && file.url.startsWith('https://libgen.gl/get.php'), host.calls);
+}
+{
+  const host = makeHost((url) => (url.startsWith('https://libgen.li/') ? res('', { status: 502 }) : res(ADS)));
+  const file = await plugin.resolveFile(release, cfg(), host);
+  ok('a mirror answering an error falls through to the next', file.url.startsWith('https://libgen.gl/get.php'), host.calls);
+}
+{
+  const host2 = makeHost(() => res(BUSY));
+  await plugin.resolveFile(release, cfg({ baseUrl: 'https://libgen.bz', settings: { downloadMirrors: 'https://libgen.vg/, https://libgen.bz, nonsense' } }), host2).catch(() => {});
+  ok('the download mirrors setting is tried in order, deduplicated, junk skipped', host2.calls.map((u) => new URL(u).host).join(',') === 'libgen.bz,libgen.vg', host2.calls);
+}
+{
+  const host = makeHost(() => res(BUSY));
+  const err = await plugin.resolveFile(release, cfg(), host).catch((e) => e);
+  ok('every mirror busy says the site is overloaded', err.failure === 'unreachable' && /overloaded/.test(err.message), err.message);
+  ok('and tried each default mirror once', host.calls.length === 5, host.calls);
+}
+{
+  const host = makeHost(() => res('<html>nothing here</html>'));
+  const err = await plugin.resolveFile(release, cfg(), host).catch((e) => e);
+  ok('no link anywhere fails the grab rather than passing a page on', err.failure === 'unreachable' && /no mirror gave a download link/.test(err.message), err.message);
 }
 {
   const host = makeHost(() => res(''));
