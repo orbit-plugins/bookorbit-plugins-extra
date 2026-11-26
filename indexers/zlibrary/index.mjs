@@ -147,7 +147,7 @@ const logins = new Map();
 
 export default {
   apiVersion: 1,
-  version: '1.0.1',
+  version: '1.0.2',
   update: {
     manifestUrl: 'https://raw.githubusercontent.com/orbit-plugins/bookorbit-plugins-extra/main/updates/zlibrary.json',
     ed25519PublicKey: 'W2ER7l0MxMLSxNvfpF5uNg421kAuGxlwlkyFUcpzHrk',
@@ -182,7 +182,7 @@ export default {
       key: 'mirrors',
       type: 'string',
       label: 'Fallback mirrors',
-      hint: 'Used for anonymous requests only. Domains the site lists are tried after these.',
+      hint: 'Only used to refresh the domain list the site publishes. Searches run on the base URL with the account session, because the site refuses anonymous searches.',
       default: KNOWN_MIRRORS.join(','),
       format: 'list',
     },
@@ -209,7 +209,7 @@ export default {
     for (const pass of passes) {
       if (releases.length >= query.limit || signal?.aborted) break;
       try {
-        const { payload, origin } = await apiCall(config, host, SEARCH_PATH, { method: 'POST', body: searchBody(pass.text, query, formats) }, signal, started);
+        const { payload, origin } = await accountCall(config, host, SEARCH_PATH, signal, { method: 'POST', body: searchBody(pass.text, query, formats) });
         for (const book of payload.books ?? []) {
           const release = toRelease(book, formats, origin);
           if (!release || seen.has(release.guid)) continue;
@@ -237,8 +237,9 @@ export default {
       const { payload } = await accountCall(config, host, PROFILE_PATH);
       // Main domains answer the profile endpoint while gating `/eapi/book/search` behind a
       // redirect wall, so a test that only checks the profile passes against a mirror that
-      // cannot search.
-      await apiCall(config, host, SEARCH_PATH, { method: 'POST', body: searchBody('dune', { limit: 1 }, formats) });
+      // cannot search. The probe goes through the account session, like a real search: the
+      // site refuses anonymous searches with "Access denied".
+      await accountCall(config, host, SEARCH_PATH, undefined, { method: 'POST', body: searchBody('dune', { limit: 1 }, formats) });
       const user = payload.user ?? {};
       const limit = toNumber(user.downloads_limit);
       const today = toNumber(user.downloads_today);
@@ -492,15 +493,16 @@ function bookOf(release) {
 }
 
 /**
- * An authenticated GET. With a password, a session the site rejects is replaced by one fresh login
- * and the call retried once; a second rejection is the password's, not the session's.
+ * An authenticated call: profile and download lookups, and searches too, because the site
+ * refuses anonymous searches. With a password, a session the site rejects is replaced by one
+ * fresh login and the call retried once; a second rejection is the password's, not the session's.
  */
-async function accountCall(config, host, path, signal) {
+async function accountCall(config, host, path, signal, { method = 'GET', body } = {}) {
   const email = emailOf(config);
   if (!email) {
     const session = cookieSession(config, host);
     try {
-      return await apiCall(config, host, path, { method: 'GET', session }, signal);
+      return await apiCall(config, host, path, { method, body, session }, signal);
     } catch (error) {
       if (error?.failure === 'unauthorized') throw host.fail('unauthorized', `${error.message}. Check remix_userid and remix_userkey.`);
       throw error;
@@ -512,11 +514,11 @@ async function accountCall(config, host, path, signal) {
   const fresh = cached?.origin === origin && cached.email === email && cached.password === config.credential && cached.session;
   const session = fresh ? cached.session : await login(config, host, email, signal);
   try {
-    return await apiCall(config, host, path, { method: 'GET', session }, signal);
+    return await apiCall(config, host, path, { method, body, session }, signal);
   } catch (error) {
     if (error?.failure !== 'unauthorized' || !fresh) throw error;
     host.logger.warn(`[zlibrary.login] [retry] indexerId=${config.id} - the site rejected the saved session, logging in again`);
-    return apiCall(config, host, path, { method: 'GET', session: await login(config, host, email, signal) }, signal);
+    return apiCall(config, host, path, { method, body, session: await login(config, host, email, signal) }, signal);
   }
 }
 
