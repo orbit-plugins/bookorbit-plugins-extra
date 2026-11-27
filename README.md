@@ -57,11 +57,11 @@ back through the host. The dynamic seedbox toggle registers the address BookOrbi
 which is only correct when your download client shares it. Enable **Use freeleech wedges** to
 request a wedge when grabbing a torrent that is neither freeleech nor VIP. This is off by default.
 
-**zlibrary** searches the ebook API anonymously. Enter the trusted HTTPS base URL for the account.
-Only that origin receives the password, session cookies, profile requests and file lookups. Fallback
-mirrors and domains learned from `/eapi/info/domains` are used for anonymous requests. Resolving a
-file spends one daily download. The plugin accepts either a session cookie pair or an email address
-and password.
+**zlibrary** talks to the ebook API using the account's session. Enter the trusted HTTPS base URL
+for the account. Only that origin receives the password, session cookies, profile requests, searches
+and file lookups. Fallback mirrors and domains learned from `/eapi/info/domains` are used for
+anonymous requests only. Resolving a file spends one daily download. The plugin accepts either a
+session cookie pair or an email address and password.
 
 ## Verifying
 

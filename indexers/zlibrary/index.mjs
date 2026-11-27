@@ -30,14 +30,15 @@
  * sanitising it is not trusted to apply itself.
  *
  * Talks to the JSON API the site's own apps use (`/eapi`) rather than scraping pages: the pages sit
- * behind a browser check and the API does not. Searching needs no account; a download does, and is
- * counted against that account's daily allowance. The account is either an e-mail and password,
- * logged in once and the session kept in memory, or the session cookies themselves.
+ * behind a browser check and the API does not. Both searching and downloading require an account
+ * session, and downloading is counted against that account's daily allowance. The account is either
+ * an e-mail and password, logged in once and the session kept in memory, or the session cookies
+ * themselves.
  *
  * The site moves between domains. The main domains answer scripts with a cookie wall, which this
- * does not try to get past: it uses the mirrors that serve the API openly, fails over between them,
- * and learns new ones from the site's own domain list. Only the operator's HTTPS base URL
- * receives account requests.
+ * does not try to get past: only the operator's trusted HTTPS base URL receives account requests
+ * (login, profile, search and download), while fallback mirrors and the site's domain list are used
+ * only for anonymous requests such as refreshing `/eapi/info/domains`.
  */
 
 const SEARCH_PATH = '/eapi/book/search';
@@ -160,7 +161,7 @@ export default {
   supportsIsbnSearch: true,
   usesCategories: false,
   seedsBack: false,
-  baseUrlHint: 'Enter the HTTPS address trusted with the account. Login, profile and download requests go only to this origin.',
+  baseUrlHint: 'Enter the HTTPS address trusted with the account. Login, profile, search and download requests go only to this origin.',
   settingsFields: [
     {
       key: 'ebookFormats',
@@ -182,7 +183,7 @@ export default {
       key: 'mirrors',
       type: 'string',
       label: 'Fallback mirrors',
-      hint: 'Only used to refresh the domain list the site publishes. Searches run on the base URL with the account session, because the site refuses anonymous searches.',
+      hint: 'Used for anonymous requests only (such as refreshing the site domain list). Searches run on the base URL with the account session.',
       default: KNOWN_MIRRORS.join(','),
       format: 'list',
     },
@@ -209,7 +210,11 @@ export default {
     for (const pass of passes) {
       if (releases.length >= query.limit || signal?.aborted) break;
       try {
-        const { payload, origin } = await accountCall(config, host, SEARCH_PATH, signal, { method: 'POST', body: searchBody(pass.text, query, formats) });
+        const { payload, origin } = await accountCall(config, host, SEARCH_PATH, signal, {
+          method: 'POST',
+          body: searchBody(pass.text, query, formats),
+          started,
+        });
         for (const book of payload.books ?? []) {
           const release = toRelease(book, formats, origin);
           if (!release || seen.has(release.guid)) continue;
@@ -219,6 +224,7 @@ export default {
         }
       } catch (error) {
         failure ??= error;
+        if (error?.failure === 'unauthorized' || error?.failure === 'throttled') break;
       }
     }
     if (failure && releases.length === 0) throw failure;
@@ -423,7 +429,7 @@ async function refreshDomains(config, host) {
 /** The API says why in `error`, with a 200 or a 400 status that carries no meaning of its own. */
 function refusal(host, status, payload) {
   const message = typeof payload.error === 'string' && payload.error.trim() ? payload.error.trim().slice(0, MAX_REFUSAL_CHARS) : `the site answered ${status}`;
-  if (status === 401 || status === 403 || /log ?in|auth|credential|password|session|user ?key/i.test(message)) {
+  if (status === 401 || status === 403 || /log ?in|auth|credential|password|session|user ?key|access denied/i.test(message)) {
     return host.fail('unauthorized', 'the site rejected the session');
   }
   if (/limit|too many|quota/i.test(message)) return host.fail('throttled', 'the site reported a request or download limit');
@@ -497,12 +503,12 @@ function bookOf(release) {
  * refuses anonymous searches. With a password, a session the site rejects is replaced by one
  * fresh login and the call retried once; a second rejection is the password's, not the session's.
  */
-async function accountCall(config, host, path, signal, { method = 'GET', body } = {}) {
+async function accountCall(config, host, path, signal, { method = 'GET', body, started } = {}) {
   const email = emailOf(config);
   if (!email) {
     const session = cookieSession(config, host);
     try {
-      return await apiCall(config, host, path, { method, body, session }, signal);
+      return await apiCall(config, host, path, { method, body, session }, signal, started);
     } catch (error) {
       if (error?.failure === 'unauthorized') throw host.fail('unauthorized', `${error.message}. Check remix_userid and remix_userkey.`);
       throw error;
@@ -514,11 +520,11 @@ async function accountCall(config, host, path, signal, { method = 'GET', body } 
   const fresh = cached?.origin === origin && cached.email === email && cached.password === config.credential && cached.session;
   const session = fresh ? cached.session : await login(config, host, email, signal);
   try {
-    return await apiCall(config, host, path, { method, body, session }, signal);
+    return await apiCall(config, host, path, { method, body, session }, signal, started);
   } catch (error) {
     if (error?.failure !== 'unauthorized' || !fresh) throw error;
     host.logger.warn(`[zlibrary.login] [retry] indexerId=${config.id} - the site rejected the saved session, logging in again`);
-    return apiCall(config, host, path, { method, body, session: await login(config, host, email, signal) }, signal);
+    return apiCall(config, host, path, { method, body, session: await login(config, host, email, signal) }, signal, started);
   }
 }
 
