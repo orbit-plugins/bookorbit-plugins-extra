@@ -92,10 +92,11 @@ const BOOK = AWAKENED.books.find((book) => book.id === 129316134);
 const DUNE = ISBN_DUNE.books.find((book) => book.identifier.includes('9780441013593') && book.title === 'Dune');
 const PDF = { ...BOOK, id: 7, hash: 'abc123', extension: 'pdf' };
 const searchAnswer = (books) => json({ success: 1, books, exactBooksCount: books.length, pagination: { limit: 30, current: 1, next: false } });
+const domainsAnswer = (domains = []) => json({ success: 1, domains });
 
 console.log('declaration');
 ok('targets the contract this build speaks', plugin.apiVersion === 1);
-ok('plugin version', plugin.version === '1.0.1');
+ok('plugin version', plugin.version === '1.0.2');
 ok('signed update channel', plugin.update?.manifestUrl.endsWith('/updates/zlibrary.json') && plugin.update.ed25519PublicKey.length === 43);
 ok('needs a session credential', plugin.requiresCredential === true && plugin.credentialKind === 'sessionId');
 ok('carries ebooks only', JSON.stringify(plugin.mediaKinds) === '["ebook"]');
@@ -116,7 +117,7 @@ console.log('search requests');
   ok('filters formats at the site', body.getAll('extensions[]').join() === 'epub,mobi,azw,azw3,fb2,djvu');
   ok('asks for the request limit', body.get('limit') === '30');
   ok('sends no language filter when none was asked for', body.getAll('languages[]').length === 0);
-  ok('sends no session to a search', init.headers.Cookie === undefined);
+  ok('sends the session to a search', init.headers.Cookie === 'remix_userid=12345678; remix_userkey=0123456789abcdef0123456789abcdef');
   ok('never follows a redirect', init.redirect === 'manual');
 }
 {
@@ -167,6 +168,11 @@ console.log('isbn pass');
   const found = await plugin.search(query({ isbn13: '9780441013593', limit: 4 }), cfg(), host);
   ok('holds the ISBN pass to half the limit', host.reqs.length === 2 && found.length === 4);
 }
+{
+  const host = makeHost(() => json({ success: 0, error: 'Access denied' }, { status: 400 }));
+  const threw = await plugin.search(query({ isbn13: '9780441013593', limit: 10 }), cfg(), host).catch((error) => error);
+  ok('stops after the ISBN pass when the session is rejected', threw?.failure === 'unauthorized' && host.reqs.length === 1, { failure: threw?.failure, calls: host.calls });
+}
 
 console.log('release rows');
 {
@@ -203,35 +209,35 @@ console.log('saved searches');
 
 console.log('mirror failover');
 {
-  const host = makeHost((url) => (url.startsWith('https://z-lib.gd/') ? unreachable() : searchAnswer([BOOK])));
+  const host = makeHost((url) => (url.startsWith('https://z-lib.gd/') ? unreachable() : domainsAnswer()));
   const config = cfg();
-  const found = await plugin.search(query(), config, host);
-  ok('moves past an unreachable base URL', found.length === 1 && host.calls[1].startsWith('https://z-lib.by/'));
-  await plugin.search(query(), config, host);
-  ok('starts the next call at the mirror that answered', host.calls[2].startsWith('https://z-lib.by/'));
+  await plugin.keepalive(config, host);
+  ok('anonymous calls move past an unreachable base URL', host.calls[1].startsWith('https://z-lib.by/'));
+  await plugin.keepalive(config, host);
+  ok('starts the next anonymous call at the mirror that answered', host.calls[2].startsWith('https://z-lib.by/'));
 }
 {
-  const host = makeHost((url) => (url.startsWith('https://z-library.sk/') ? wall() : searchAnswer([BOOK])));
-  const found = await plugin.search(query(), cfg({ baseUrl: 'https://z-library.sk' }), host);
-  ok('treats a redirect as a wall and moves on', found.length === 1 && host.calls.length === 2 && host.calls[1].startsWith('https://z-lib.by/'));
+  const host = makeHost((url) => (url.startsWith('https://z-library.sk/') ? wall() : domainsAnswer()));
+  await plugin.keepalive(cfg({ baseUrl: 'https://z-library.sk' }), host);
+  ok('treats a redirect as a wall and moves on', host.calls.length === 2 && host.calls[1].startsWith('https://z-lib.by/'));
 }
 {
   const host = makeHost((url) =>
-    url.startsWith('https://z-lib.gd/') ? res('<title>Checking your browser ...</title>', { status: 503 }) : searchAnswer([BOOK]),
+    url.startsWith('https://z-lib.gd/') ? res('<title>Checking your browser ...</title>', { status: 503 }) : domainsAnswer(),
   );
-  const found = await plugin.search(query(), cfg(), host);
-  ok('treats a browser check page as a dead mirror', found.length === 1 && host.calls.length === 2);
+  await plugin.keepalive(cfg(), host);
+  ok('treats a browser check page as a dead mirror', host.calls.length === 2);
 }
 {
-  const host = makeHost((url) => (url.startsWith('https://mine.example/') ? searchAnswer([BOOK]) : unreachable()));
-  await plugin.search(query(), cfg({ settings: { mirrors: 'mine.example' } }), host);
-  ok('uses configured mirrors in place of the built-in list', host.calls.join() === 'https://z-lib.gd/eapi/book/search,https://mine.example/eapi/book/search');
+  const host = makeHost((url) => (url.startsWith('https://mine.example/') ? domainsAnswer() : unreachable()));
+  await plugin.keepalive(cfg({ settings: { mirrors: 'mine.example' } }), host);
+  ok('uses configured mirrors in place of the built-in list', host.calls.join() === 'https://z-lib.gd/eapi/info/domains,https://mine.example/eapi/info/domains');
 }
 {
   const host = makeHost(unreachable);
   let threw = null;
   try {
-    await plugin.search(query(), cfg({ settings: { mirrors: 'a.example,b.example' } }), host);
+    await plugin.keepalive(cfg({ settings: { mirrors: 'a.example,b.example' } }), host);
   } catch (error) {
     threw = error;
   }
@@ -268,10 +274,10 @@ for (const error of [
   const config = cfg({ settings: { mirrors: 'fallback.example' } });
   const host = makeHost((url) => {
     if (url.startsWith(config.baseUrl)) throw error;
-    return searchAnswer([BOOK]);
+    return domainsAnswer();
   });
-  const rows = await plugin.search(query(), config, host).catch(() => []);
-  ok(`anonymous search retries a transport failure (${error.name})`, rows.length === 1 && host.calls.length === 2);
+  const okKeepalive = await plugin.keepalive(config, host).then(() => true, () => false);
+  ok(`anonymous keepalive retries a transport failure (${error.name})`, okKeepalive && host.calls.length === 2);
 }
 {
   const denied = Object.assign(new Error('Address policy refusal'), { name: 'PrivateAddressException' });
@@ -282,11 +288,15 @@ for (const error of [
 
 for (const email of ['', 'account@example.com']) {
   const config = cfg({ settings: { email, mirrors: 'fallback.example' } });
-  const host = makeHost((url) => url.startsWith(config.baseUrl) ? wall() : searchAnswer([BOOK]));
-  await plugin.search(query(), config, host);
+  const host = makeHost((url) => (url.startsWith(config.baseUrl) ? wall() : domainsAnswer()));
+  await plugin.keepalive(config, host);
+  host.reqs.length = 0;
+  const searchErr = await plugin.search(query(), config, host).catch((error) => error);
+  ok(`search pins the ${email ? 'password' : 'session'} to the base URL after anonymous failover`,
+    searchErr?.failure === 'unreachable' && host.calls.length === 1 && host.calls[0].startsWith(config.baseUrl + '/'), host.calls);
   host.reqs.length = 0;
   const result = await plugin.test(config, host);
-  ok(`only the base URL receives the ${email ? 'password' : 'session'} after anonymous failover`,
+  ok(`only the base URL receives the ${email ? 'password' : 'session'} during test after anonymous failover`,
     !result.success && host.calls.length === 1 && host.calls[0].startsWith(config.baseUrl + '/'));
 }
 {
@@ -294,7 +304,7 @@ for (const email of ['', 'account@example.com']) {
   const result = await plugin.test(cfg({ baseUrl: '' }), host);
   ok('requires a secure base URL before sending a credential', !result.success && host.calls.length === 0);
 }
-for (const reason of ['Invalid credentials', 'Daily limit', 'Unexpected response']) {
+for (const reason of ['Invalid credentials', 'Access denied', 'Daily limit', 'Unexpected response']) {
   const marker = 'fixture-detail';
   const host = makeHost(() => json({ success: 0, error: reason + ' ' + marker }));
   const result = await plugin.test(cfg(), host);
@@ -304,29 +314,32 @@ for (const reason of ['Invalid credentials', 'Daily limit', 'Unexpected response
 
 console.log('domain discovery');
 {
+  let first = true;
   const host = makeHost((url) => {
-    if (url.endsWith('/eapi/info/domains')) {
-      return json({
-        success: 1,
-        domains: [
-          { domain: 'new-mirror.example', contentAvailable: true, isRedirector: false },
-          { domain: 'redirector.example', contentAvailable: true, isRedirector: true },
-          { domain: 'empty.example', contentAvailable: false, isRedirector: false },
-        ],
-      });
+    if (first && url === 'https://z-lib.gd/eapi/info/domains') {
+      first = false;
+      return domainsAnswer([
+        { domain: 'new-mirror.example', contentAvailable: true, isRedirector: false },
+        { domain: 'redirector.example', contentAvailable: true, isRedirector: true },
+        { domain: 'empty.example', contentAvailable: false, isRedirector: false },
+      ]);
     }
-    return url.startsWith('https://new-mirror.example/') ? searchAnswer([BOOK]) : unreachable();
+    return url.startsWith('https://new-mirror.example/') ? domainsAnswer() : unreachable();
   });
   const config = cfg({ settings: { mirrors: 'dead.example' } });
   await plugin.keepalive(config, host);
-  const found = await plugin.search(query(), config, host);
+  await plugin.keepalive(config, host);
   ok('keepalive reads the site domain list', host.calls[0] === 'https://z-lib.gd/eapi/info/domains');
-  ok('a listed domain is tried after the configured ones', found.length === 1 && host.calls.slice(1).join() === 'https://z-lib.gd/eapi/book/search,https://dead.example/eapi/book/search,https://new-mirror.example/eapi/book/search', host.calls);
+  ok('a listed domain is tried after the configured ones', host.calls.slice(1).join() === 'https://z-lib.gd/eapi/info/domains,https://dead.example/eapi/info/domains,https://new-mirror.example/eapi/info/domains', host.calls);
   ok('skips redirectors and domains without content', !host.calls.some((url) => /redirector|empty/.test(url)));
 
   const before = host.reqs.length;
-  const other = await plugin.search(query(), cfg({ settings: { mirrors: 'dead.example' } }), host).catch((error) => error);
+  const other = await plugin.keepalive(cfg({ settings: { mirrors: 'dead.example' } }), host).catch((error) => error);
   ok('keeps one indexer\'s listed domains away from another', other?.failure === 'unreachable' && !host.calls.slice(before).some((url) => url.includes('new-mirror')));
+
+  host.reqs.length = 0;
+  const searched = await plugin.search(query(), config, host).catch((error) => error);
+  ok('never sends a search session to a listed domain', searched?.failure === 'unreachable' && host.calls.length === 1 && !host.calls.some((url) => url.includes('new-mirror')), host.calls);
 
   host.reqs.length = 0;
   const tested = await plugin.test({ ...config, credential: '12345678:0123456789abcdef' }, host);
@@ -343,24 +356,19 @@ console.log('session');
   const result = await plugin.test(cfg(), host);
   ok('tests against the profile', host.calls[0] === 'https://z-lib.gd/eapi/user/profile' && host.reqs[0].init.method === 'GET');
   ok('sends the session as cookies', host.reqs[0].init.headers.Cookie === 'remix_userid=12345678; remix_userkey=0123456789abcdef0123456789abcdef');
-  ok('and probes search without the session', host.calls[1] === 'https://z-lib.gd/eapi/book/search' && host.reqs[1].init.headers.Cookie === undefined);
+  ok('and probes search with the session', host.calls[1] === 'https://z-lib.gd/eapi/book/search' && host.reqs[1].init.headers.Cookie === 'remix_userid=12345678; remix_userkey=0123456789abcdef0123456789abcdef');
   ok('reports the daily allowance', result.success === true && result.indexerName === 'Z-Library (7 of 10 downloads left today)', result);
 }
 {
   // Main domains answer `/eapi/user/profile` while redirecting `/eapi/book/search` into DiamWall.
   const host = makeHost((url) => (url.endsWith('/eapi/user/profile') ? json({ success: 1, user: {} }) : wall()));
-  const result = await plugin.test(cfg({ baseUrl: 'https://z-lib.sk', settings: { mirrors: 'https://z-library.sk' } }), host);
-  ok('fails the test when every mirror walls search behind a redirect', result.success === false && /z-lib\.sk answered 307/.test(result.error), result);
+  const result = await plugin.test(cfg({ baseUrl: 'https://z-lib.sk', settings: { mirrors: 'https://z-lib.by' } }), host);
+  ok('fails the test when the base URL walls search behind a redirect', result.success === false && /did not answer the account request/.test(result.error) && host.calls.every((u) => u.startsWith('https://z-lib.sk/')), { result, calls: host.calls });
 }
 {
-  const host = makeHost((url) => {
-    if (url.endsWith('/eapi/user/profile')) return json({ success: 1, user: {} });
-    return url.startsWith('https://z-lib.sk/') ? wall() : searchAnswer([BOOK]);
-  });
-  const config = cfg({ baseUrl: 'https://z-lib.sk', settings: { mirrors: 'https://z-lib.by' } });
-  const result = await plugin.test(config, host);
-  await plugin.search(query(), config, host);
-  ok('switches to a fallback mirror when the base URL walls search during test', result.success === true && host.calls.at(-1) === 'https://z-lib.by/eapi/book/search', host.calls);
+  const host = makeHost((url) => (url.endsWith('/eapi/user/profile') ? json({ success: 1, user: {} }) : json({ success: 0, error: 'Access denied' }, { status: 400 })));
+  const result = await plugin.test(cfg(), host);
+  ok('reads Access denied on search as a rejected session', result.success === false && /rejected the session/.test(result.error), result);
 }
 {
   const host = makeHost(() => json({ success: 1, user: {} }));
@@ -448,6 +456,27 @@ const profileAnswer = () => json({ success: 1, user: { downloads_today: 1, downl
   const file = await plugin.resolveFile({ guid: '129316134-a03568', title: 'Awakened', format: 'epub', sizeBytes: null, seeders: null, leechers: null }, passwordCfg(), host);
   ok('a grab logs in with the password too', file.url === 'https://dl.example/x' && host.reqs[1].init.headers.Cookie === 'remix_userid=777; remix_userkey=feedface0123');
 }
+{
+  let searches = 0;
+  const host = makeHost((url) => {
+    if (url.endsWith('/eapi/user/login')) return loginAnswer();
+    if (url.endsWith('/eapi/user/profile')) return profileAnswer();
+    searches += 1;
+    // First search (inside test) passes; second search gets "Access denied" on the cached session; third passes after re-login.
+    return searches === 2 ? json({ success: 0, error: 'Access denied' }, { status: 400 }) : searchAnswer([BOOK]);
+  });
+  const config = passwordCfg();
+  await plugin.test(config, host);
+  const found = await plugin.search(query(), config, host);
+  ok('re-logs in once when search returns Access denied on an expired session',
+    found.length === 1 && host.calls.filter((u) => u.endsWith('/eapi/user/login')).length === 2 && searches === 3, host.calls);
+}
+{
+  const host = makeHost((url) => (url.endsWith('/eapi/user/login') ? loginAnswer() : json({ success: 0, error: 'Access denied' }, { status: 400 })));
+  const threw = await plugin.search(query(), passwordCfg(), host).catch((error) => error);
+  ok('does not loop when search returns Access denied on a fresh session',
+    threw?.failure === 'unauthorized' && host.calls.filter((u) => u.endsWith('/eapi/user/login')).length === 1, host.calls);
+}
 
 console.log('forget()');
 {
@@ -466,16 +495,14 @@ console.log('forget()');
   const host = makeHost((url) =>
     url.startsWith('https://z-lib.gd/')
       ? unreachable()
-      : url.endsWith('/eapi/info/domains')
-        ? json({ success: 1, domains: [{ domain: 'new-mirror.example', isRedirector: false, contentAvailable: true }] })
-        : searchAnswer([BOOK]),
+      : domainsAnswer([{ domain: 'new-mirror.example', isRedirector: false, contentAvailable: true }]),
   );
   const config = cfg({ settings: { mirrors: 'https://mine.example' } });
   await plugin.keepalive(config, host);
   plugin.forget(config.id);
-  const next = makeHost((url) => (url.startsWith('https://new-mirror.example/') ? searchAnswer([BOOK]) : unreachable()));
-  await plugin.search(query(), config, next).catch(() => {});
-  ok('drops the remembered mirror and discovered domains when told to', next.calls.join() === 'https://z-lib.gd/eapi/book/search,https://mine.example/eapi/book/search', next.calls);
+  const next = makeHost((url) => (url.startsWith('https://new-mirror.example/') ? domainsAnswer() : unreachable()));
+  await plugin.keepalive(config, next).catch(() => {});
+  ok('drops the remembered mirror and discovered domains when told to', next.calls.join() === 'https://z-lib.gd/eapi/info/domains,https://mine.example/eapi/info/domains', next.calls);
 }
 
 console.log('resolveFile');
@@ -533,26 +560,27 @@ const release = { guid: '129316134-a03568', title: 'Awakened (The Last Daughter 
   const config = cfg({ settings: { mirrors: 'fallback.example' } });
   let simultaneous = false;
   const file = Promise.withResolvers();
-  const search = Promise.withResolvers();
+  const domains = Promise.withResolvers();
   const waiting = Promise.withResolvers();
   let readers = 0;
   const host = makeHost((url) => {
-    if (!simultaneous) return url.startsWith(config.baseUrl) ? wall() : searchAnswer([BOOK]);
-    const pending = url.endsWith('/file') ? file : search;
+    if (!simultaneous) return url.startsWith(config.baseUrl) ? wall() : domainsAnswer();
+    const pending = url.endsWith('/file') ? file : domains;
     return { status: 200, text: () => {
       if (++readers === 2) waiting.resolve();
       return pending.promise;
     } };
   });
-  await plugin.search(query(), config, host);
+  await plugin.keepalive(config, host);
   simultaneous = true;
   const download = plugin.resolveFile(release, config, host);
-  const rows = plugin.search(query(), config, host);
+  const refresh = plugin.keepalive(config, host);
   await waiting.promise;
   file.resolve(JSON.stringify({ success: 1, file: { downloadLink: '/dl/book' } }));
-  search.resolve(JSON.stringify({ success: 1, books: [BOOK] }));
-  ok('concurrent search and file responses retain their own origins',
-    (await download).url === config.baseUrl + '/dl/book' && (await rows)[0].infoUrl.startsWith('https://fallback.example/'));
+  domains.resolve(JSON.stringify({ success: 1, domains: [] }));
+  await refresh;
+  ok('concurrent file and anonymous failover responses retain their own origins',
+    (await download).url === config.baseUrl + '/dl/book' && host.calls.includes('https://fallback.example/eapi/info/domains'));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
